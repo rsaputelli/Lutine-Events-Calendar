@@ -24,6 +24,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
+import re, html, requests
+
 # -----------------------------
 # Config & Secrets
 # -----------------------------
@@ -117,6 +119,69 @@ def graph_delete_event(token: str, shared_mailbox_upn: str, outlook_event_id: st
     r = requests.delete(url, headers=headers, timeout=20)
     if r.status_code not in (204, 404):
         raise RuntimeError(f"Graph DELETE {r.status_code}: {r.text}")
+        
+def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, mailbox_upn: str, token: str) -> bool:
+    """
+    Upserts the red 11px 'Meeting Manager + [App Outlook Event ID: X]' block
+    in the event's HTML body, preserving the existing ID if present.
+    Returns True on success (PATCH 2xx), False otherwise.
+    """
+    try:
+        # 1) Fetch current body
+        get_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_upn}/events/{outlook_event_id}"
+        headers = {"Authorization": f"Bearer {token}"}
+        r = requests.get(get_url, headers=headers, timeout=15)
+        r.raise_for_status()
+        body_obj = (r.json() or {}).get("body", {}) or {}
+        content_type = (body_obj.get("contentType") or "html").lower()
+        cur_html = body_obj.get("content") or ""
+
+        # 2) Normalize to HTML so we never drop text bodies
+        if content_type == "text" and cur_html:
+            cur_html = f"<pre>{html.escape(cur_html)}</pre>"
+
+        # 3) Regex to locate existing red 11px manager block and capture current ID
+        block_re = re.compile(
+            r"""<p[^>]*style=['"]?[^'"]*color\s*:\s*red[^'"]*font-size\s*:\s*11px[^'"]*['"]?[^>]*>\s*
+                 <b>\s*Meeting\s+Manager:\s*(?P<name>.*?)\s*</b>\s*
+                 <br\s*/?>\s*(?:<br\s*/?>)?\s*
+                 <b>\s*\[(?:App\s+)?Outlook\s+Event\s+ID:?\s*(?P<eid>[^\]]+)\]\s*</b>\s*
+               </p>""",
+            re.IGNORECASE | re.DOTALL | re.VERBOSE
+        )
+
+        new_block = (
+            f"<p style='color:red;font-size:11px'>"
+            f"<b>Meeting Manager: {html.escape(manager_name)}</b><br><br>"
+            f"<b>[App Outlook Event ID: {{EID}}]</b>"
+            f"</p>"
+        )
+
+        m = block_re.search(cur_html)
+        if m:
+            # Preserve whatever ID is already in the body
+            preserved_id = (m.group("eid") or "").strip()
+            replacement = new_block.replace("{EID}", preserved_id)
+            new_html = block_re.sub(replacement, cur_html, count=1)
+        else:
+            # No block found — append a fresh one using the known event id
+            replacement = new_block.replace("{EID}", outlook_event_id)
+            new_html = cur_html + replacement
+
+        # 4) PATCH updated HTML back
+        patch_url = get_url
+        patch_headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        patch_payload = {"body": {"contentType": "HTML", "content": new_html}}
+        p = requests.patch(patch_url, headers=patch_headers, json=patch_payload, timeout=15)
+        p.raise_for_status()
+        return True
+
+    except Exception:
+        return False
+        
     
 
 # -----------------------------
@@ -885,10 +950,14 @@ with tab_edit:
     end_date_e   = colD2.date_input("End Date",   value=(end_e - (timedelta(days=1) if is_all_day_e else timedelta(0))).date(), key="edit_end_date")
 
     if not is_all_day_e:
-        st.markdown("**Start Time**")
-        start_time_e = ampm_time_picker("Start", default=start_e.time(), key_prefix="edit_start")
-        st.markdown("**End Time**")
-        end_time_e = ampm_time_picker("End", default=end_e.time(), key_prefix="edit_end")
+        start_time_e = st.time_input("Start Time", value=start_e.time().replace(second=0, microsecond=0),
+                                     key="edit_start_time", step=timedelta(minutes=5))
+        end_time_e   = st.time_input("End Time",   value=end_e.time().replace(second=0, microsecond=0),
+                                     key="edit_end_time",   step=timedelta(minutes=5))
+    else:
+        start_time_e = time(0, 0)
+        end_time_e   = time(0, 0)
+
     else:
         start_time_e = time(0, 0)
         end_time_e   = time(0, 0)
@@ -930,20 +999,49 @@ with tab_edit:
 
     # Reminder modes (edit)
     rem2c1, rem2c2 = st.columns([1, 2])
-    rem_mode_e = rem2c1.selectbox(
+
+    # Initialize once from stored minutes
+    if "edit_rem_mode" not in st.session_state:
+        stored_mins = int(ev.get("reminder_minutes") or 0)
+        st.session_state["edit_rem_mode"] = (
+            "Minutes before start (Outlook)" if stored_mins and stored_mins < 1440 else
+            ("Days before start (Outlook)" if stored_mins >= 1440 else "On date/time (Email via app)")
+        )
+    if "edit_reminder_minutes" not in st.session_state:
+        st.session_state["edit_reminder_minutes"] = int(ev.get("reminder_minutes") or 30)
+    if "edit_reminder_days" not in st.session_state:
+        base = int(ev.get("reminder_minutes") or 0)
+        st.session_state["edit_reminder_days"] = max(1, base // 1440) if base >= 1440 else 1
+    if "edit_reminder_datetime_local" not in st.session_state:
+        st.session_state["edit_reminder_datetime_local"] = datetime.combine(date.today(), time(9,0))
+
+    st.session_state["edit_rem_mode"] = rem2c1.selectbox(
         "Reminder Type",
         ["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"],
-        index=0, key="edit_rem_mode"
+        index=["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"]
+              .index(st.session_state["edit_rem_mode"]),
+        key="edit_rem_mode_live"
     )
-    reminder_minutes_e = int(ev.get("reminder_minutes") or 30)
-    reminder_days_e = max(0, reminder_minutes_e // 1440) if reminder_minutes_e >= 1440 else 0
-    reminder_datetime_local_e = None
-    if rem_mode_e.startswith("Minutes"):
-        reminder_minutes_e = rem2c2.number_input("Minutes before start", min_value=0, max_value=10080, value=reminder_minutes_e, key="edit_rem_mins")
-    elif rem_mode_e.startswith("Days"):
-        reminder_days_e = rem2c2.number_input("Days before start", min_value=0, max_value=365, value=(reminder_days_e or 1), key="edit_rem_days")
+
+    if st.session_state["edit_rem_mode"].startswith("Minutes"):
+        st.session_state["edit_reminder_minutes"] = rem2c2.number_input(
+            "Minutes before start", min_value=0, max_value=10080,
+            value=int(st.session_state["edit_reminder_minutes"]),
+            key="edit_rem_mins_live"
+        )
+    elif st.session_state["edit_rem_mode"].startswith("Days"):
+        st.session_state["edit_reminder_days"] = rem2c2.number_input(
+            "Days before start", min_value=1, max_value=365,
+            value=int(st.session_state["edit_reminder_days"]),
+            key="edit_rem_days_live"
+        )
     else:
-        reminder_datetime_local_e = rem2c2.datetime_input("Reminder date & time", value=datetime.combine(date.today(), time(9,0)), key="edit_rem_dt")
+        st.session_state["edit_reminder_datetime_local"] = rem2c2.datetime_input(
+            "Reminder date & time",
+            value=st.session_state["edit_reminder_datetime_local"],
+            key="edit_rem_dt_live"
+        )
+
 
     # 👇 ADD THIS BLOCK *HERE* (just before the Save button)
     st.text_input(
@@ -988,37 +1086,51 @@ with tab_edit:
         end_utc_new   = end_local_new.astimezone(ZoneInfo("UTC"))
 
         # Reminder minutes for Outlook
-        rem_minutes_for_graph_e = 0
+        rem_mode_e = st.session_state["edit_rem_mode"]
         if rem_mode_e.startswith("Minutes"):
-            rem_minutes_for_graph_e = int(reminder_minutes_e)
+            rem_minutes_for_graph_e = int(st.session_state.get("edit_reminder_minutes", 30))
         elif rem_mode_e.startswith("Days"):
-            rem_minutes_for_graph_e = int(reminder_days_e) * 1440
+            rem_minutes_for_graph_e = int(st.session_state.get("edit_reminder_days", 1)) * 1440
+        else:
+            rem_minutes_for_graph_e = 0  # date-certain handled below
         rem_minutes_for_graph_e = max(0, min(rem_minutes_for_graph_e, 525600))
 
-        # Build PATCH payload for Outlook
-        vp_label_e_internal = {"Teams":"teams","Zoom":"zoom","Other":"other"}.get(vp_label_e if event_type_e=="Virtual" else "Other","other") if 'vp_label_e' in locals() else (virtual_provider_e or "other")
-        tz_windows_e = TZ_MAP[tz_choice_lbl]
-        location_str_e = location_e if event_type_e == "In-person" else (virtual_link_e if (virtual_provider_e == "zoom") else None)
-        payload_e = build_graph_event_payload(
-            subject=subject_e,
-            body_html="",  # leave empty or rebuild from fields if you prefer
-            tz_windows=tz_windows_e,
-            start_dt=start_local_new if not is_all_day_e else start_date_e,
-            end_dt=end_local_new if not is_all_day_e else end_date_e,
-            is_all_day=is_all_day_e,
-            location_str=location_str_e,
-            set_teams=(event_type_e == "Virtual" and (virtual_provider_e == "teams")),
-            reminder_minutes=rem_minutes_for_graph_e
-        )
 
-        # PATCH Outlook if we have an Outlook ID
+        # --- PATCH Outlook core fields (subject/time/location/reminder); do NOT send body here ---
         try:
             if ev.get("outlook_event_id"):
                 if missing: raise RuntimeError("Missing Graph secrets for update.")
                 token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
-                update_outlook_event(token, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"], payload_e)
+
+                tz_windows_e = TZ_MAP[tz_choice_e]
+                patch_payload = {
+                    "subject": subject_e,
+                    "isAllDay": bool(is_all_day_e),
+                    "start": graph_datetime_obj(start_local_new, tz_windows=tz_windows_e),
+                    "end":   graph_datetime_obj(end_local_new,   tz_windows=tz_windows_e),
+                    "isReminderOn": bool(rem_minutes_for_graph_e > 0),
+                    "reminderMinutesBeforeStart": int(rem_minutes_for_graph_e),
+                }
+                if event_type_e == "In-person":
+                    patch_payload["location"] = {"displayName": location_e or ""}
+                else:
+                    patch_payload["location"] = {"displayName": ""}
+
+                update_outlook_event(token, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"], patch_payload)
+
+                # Now update ONLY the red Meeting Manager block (preserve ID and styling)
+                ok_mgr = update_outlook_manager_block(
+                    outlook_event_id=ev["outlook_event_id"],
+                    manager_name=manager_name_e,
+                    mailbox_upn=GRAPH["shared_mailbox_upn"],
+                    token=token,
+                )
+                if not ok_mgr:
+                    st.warning("Could not update the Meeting Manager line in the Outlook body (non-fatal).")
+
         except Exception as e:
             st.error(f"Outlook update failed: {e}")
+
 
         # UPDATE Supabase
         try:
@@ -1040,9 +1152,9 @@ with tab_edit:
             }).eq("id", ev["id"]).execute()
 
             # Upsert date-certain reminder if selected
-            if rem_mode_e.startswith("On date/time") and reminder_datetime_local_e:
-                notify_utc_e = reminder_datetime_local_e.replace(tzinfo=ZoneInfo(iana_new)).astimezone(ZoneInfo("UTC"))
-                upsert_custom_reminder(supabase, ev["id"], notify_utc_e.isoformat(), manager_email_e, f"Reminder: {subject_e}", f"Reminder for {subject_e} ({ev.get('client') or ''})")
+            if rem_mode_e.startswith("On date/time") and st.session_state.get("edit_reminder_datetime_local"):
+                notify_utc_e = st.session_state["edit_reminder_datetime_local"].replace(...)
+
 
             # Remove missing-link reminders if we now have a link
             if event_type_e == "Virtual" and (virtual_link_e):
