@@ -630,7 +630,7 @@ with tab_create:
                     f"[App Outlook Event ID: {outlook_event_id}]"
                     f"</p>"
                     
-)                )
+                )
                 patch_url = (
                     f"https://graph.microsoft.com/v1.0/users/"
                     f"{GRAPH['shared_mailbox_upn']}/events/{outlook_event_id}"
