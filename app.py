@@ -186,7 +186,7 @@ def send_email_smtp(to_addrs, subject: str, html_body: str, cc_addrs=None, bcc_a
 # --- Unified notifier: try Graph then SMTP ---
 def notify_via_graph_then_smtp(to_addrs, subject: str, html_body: str, cc_addrs=None):
     # 1) Try Graph if Graph secrets are present
-    G = SECRETS.get("graph") or {}
+    G = GRAPH or {}  # use the already-loaded GRAPH secrets
     have_graph = all(G.get(k) for k in ("tenant_id","client_id","client_secret","shared_mailbox_upn"))
     if have_graph:
         try:
