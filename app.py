@@ -1281,7 +1281,7 @@ with tab_edit:
                         token=token,
                         mailbox_upn=GRAPH["shared_mailbox_upn"],
                         event_id=ev["outlook_event_id"],
-                        client_value=client_value,                  # from edit form
+                        client_value=client_for_body,                  
                         accreditation_required=accreditation_required_e,
                     )
                     if not ok_meta:
