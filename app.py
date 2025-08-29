@@ -26,6 +26,7 @@ from email.utils import formataddr
 
 import re, html, requests
 from docx.shared import RGBColor  # for red text
+from urllib.parse import quote
 
 
 # -----------------------------
@@ -189,6 +190,15 @@ def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, ma
     except Exception:
         return False
 
+def graph_get_event(token: str, upn: str, event_id: str) -> dict:
+    """GET one event by Graph ID (URL-encodes the ID)."""
+    if not event_id:
+        raise ValueError("event_id is required")
+    url = f"https://graph.microsoft.com/v1.0/users/{upn}/events/{quote(event_id, safe='')}"
+    headers = {"Authorization": f"Bearer {token}"}
+    r = requests.get(url, headers=headers, timeout=20)
+    r.raise_for_status()
+    return r.json()
 
 
         
@@ -696,34 +706,28 @@ with tab_create:
             except Exception:
                 pass
 
-        # Outlook body (base)
-        lines = []
-        if client_value:
-            lines.append(f"<p><b>Client:</b> {client_value}</p>")
-        if event_type == "Virtual":
-            vp_label = {"teams": "Teams", "zoom": "Zoom", "other": "Virtual"}.get(virtual_provider, "Virtual")
-            if virtual_link:
-                lines.append(f"<p><b>Virtual:</b> {vp_label} – <a href='{virtual_link}'>{virtual_link}</a></p>")
-            else:
-                lines.append(f"<p><b>Virtual:</b> {vp_label} – (link to be provided)</p>")
-        if event_type == "In-person" and location:
-            lines.append(f"<p><b>Location:</b> {location}</p>")
-        if notes:
-            lines.append(f"<p>{notes}</p>")
-        if accreditation_required:
-            lines.append("<p><b>Accreditation Required:</b> Yes</p>")
-        body_html = "\n".join(lines) or "<p></p>"
+        # --- Minimal Outlook body: Client + Accreditation + Manager (11pt) ---
+        import html  # at top of file if not already
 
-        # Robust HTML for Outlook (pt units + span inside wrapper)
-        note_snippet = (
-            f"<div style='mso-line-height-rule:exactly;'>"
-            f"  <span style='font-family:Segoe UI, Arial, sans-serif; font-size:11pt; color:#c00000;'>"
-            f"    <b>Meeting Manager: {manager_name}</b><br><br>"
-            f"    <b>[App Outlook Event ID will sync here]</b>"
-            f"  </span>"
-            f"</div>"
+        # Line 1: Client (optional)
+        client_line = f"<p><b>Client:</b> {html.escape(client_value)}</p>" if client_value else ""
+
+        # Line 2: Accreditation (always show Yes/No)
+        acc_flag = "Yes" if accreditation_required else "No"
+        acc_line = f"<p><b>Accreditation:</b> {acc_flag}</p>"
+
+        # Line 3: Manager block (robust for Outlook using 1-cell table, 11pt)
+        safe_mgr = html.escape(manager_name or "")
+        manager_block = (
+            "<table role='presentation' style='border-collapse:collapse;border-spacing:0;margin:0;padding:0;'>"
+            "<tr><td style='font-family:Segoe UI, Arial, sans-serif; font-size:11pt; color:#c00000;'>"
+            f"<b>Meeting Manager: {safe_mgr}</b><br><br>"
+            f"<b>[App Outlook Event ID will sync here]</b>"
+            "</td></tr></table>"
         )
-        combined_body = body_html + note_snippet
+
+        combined_body = client_line + acc_line + manager_block
+
 
         # Graph payload + reminder minutes (read from session)
         tz_windows = TZ_MAP[tz_choice]
@@ -1161,37 +1165,50 @@ with tab_edit:
                     rem_minutes_for_graph_e = 0  # date-certain handled below
                 rem_minutes_for_graph_e = max(0, min(rem_minutes_for_graph_e, 525600))
 
-                # ---- PATCH Outlook core fields (subject/time/location/reminder); DO NOT send body ----
-                if ev.get("outlook_event_id"):
-                    if missing:
-                        raise RuntimeError("Missing Graph secrets for update.")
-                    token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+            # ---- PATCH Outlook core fields (subject/time/location/reminder); DO NOT send body ----
+            if ev.get("outlook_event_id"):
+                if missing:
+                    raise RuntimeError("Missing Graph secrets for update.")
+                token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
 
-                    tz_windows_e = TZ_MAP[tz_choice_e]
-                    patch_payload = {
-                        "subject": subject_e,
-                        "isAllDay": bool(is_all_day_e),
-                        "start": graph_datetime_obj(start_local_new, tz_windows=tz_windows_e),
-                        "end":   graph_datetime_obj(end_local_new,   tz_windows=tz_windows_e),
-                        "isReminderOn": bool(rem_minutes_for_graph_e > 0),
-                        "reminderMinutesBeforeStart": int(rem_minutes_for_graph_e),
-                    }
-                    if event_type_e == "In-person":
-                        patch_payload["location"] = {"displayName": location_e or ""}
-                    else:
-                        patch_payload["location"] = {"displayName": ""}
+                tz_windows_e = TZ_MAP[tz_choice_e]
+                patch_payload = {
+                    "subject": subject_e,
+                    "isAllDay": bool(is_all_day_e),
+                    "start": graph_datetime_obj(start_local_new, tz_windows=tz_windows_e),
+                    "end":   graph_datetime_obj(end_local_new,   tz_windows=tz_windows_e),
+                    "isReminderOn": bool(rem_minutes_for_graph_e > 0),
+                    "reminderMinutesBeforeStart": int(rem_minutes_for_graph_e),
+                }
+                if event_type_e == "In-person":
+                    patch_payload["location"] = {"displayName": location_e or ""}
+                else:
+                    patch_payload["location"] = {"displayName": ""}
 
-                    update_outlook_event(token, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"], patch_payload)
+                # Core Outlook update
+                update_outlook_event(token, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"], patch_payload)
 
-                    # Update ONLY the red Meeting Manager block (preserve ID & formatting)
-                    ok_mgr = update_outlook_manager_block(
-                        outlook_event_id=ev["outlook_event_id"],
-                        manager_name=manager_name_e,
-                        mailbox_upn=GRAPH["shared_mailbox_upn"],
-                        token=token,
-                    )
-                    if not ok_mgr:
-                        st.warning("Could not update the Meeting Manager line in the Outlook body (non-fatal).")
+                # Update ONLY the red Meeting Manager block (preserve ID & formatting)
+                ok_mgr = update_outlook_manager_block(
+                    outlook_event_id=ev["outlook_event_id"],
+                    manager_name=manager_name_e,
+                    mailbox_upn=GRAPH["shared_mailbox_upn"],
+                    token=token,
+                )
+                if not ok_mgr:
+                    st.warning("Could not update the Meeting Manager line in the Outlook body (non-fatal).")
+
+                # 🔥 New: Update Client + Accreditation lines (insert/replace before manager block)
+                ok_meta = upsert_outlook_client_and_accreditation(
+                    token=token,
+                    mailbox_upn=GRAPH["shared_mailbox_upn"],
+                    event_id=ev["outlook_event_id"],
+                    client_value=client_value,                  # from edit form
+                    accreditation_required=accreditation_required_e,
+                )
+                if not ok_meta:
+                    st.warning("Could not update Client/Accreditation lines in the Outlook body (non-fatal).")
+
 
                 # ---- UPDATE Supabase ----
                 supabase.table("events").update({
@@ -1494,23 +1511,36 @@ with st.sidebar:
         st.divider()
 
         # --- Per-event Refresh ---
-        selected_event_id = st.text_input("Outlook Event ID", value="", key="sb_refresh_id")
+        # Pre-fill with the selected event's ID if available
+        prefill_id = (ev.get("outlook_event_id") or "")
+        selected_event_id = st.text_input("Outlook Event ID", value=prefill_id, key="sb_refresh_id")
+
         if st.button("🔃 Refresh Selected Event", key="sb_refresh_btn"):
-            ev_id = (selected_event_id or "").strip()
-            if not ev_id:
+            ev_id_raw = (selected_event_id or "").strip()
+            if not ev_id_raw:
                 st.warning("Enter an Outlook Event ID first.")
             else:
                 try:
+                    # quick sanity: Graph IDs are usually long-ish; obvious truncation -> warn early
+                    if len(ev_id_raw) < 40:
+                        st.warning("That ID looks truncated. Please paste the full Outlook event ID.")
+                        st.stop()
+
                     if not GRAPH or not all(GRAPH.get(k) for k in ("tenant_id","client_id","client_secret","shared_mailbox_upn")):
                         raise RuntimeError("Missing Graph secrets.")
                     if supabase is None:
                         raise RuntimeError("Supabase not configured.")
 
                     token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
-                    g = graph_get_event(token, GRAPH["shared_mailbox_upn"], ev_id)
+                    g = graph_get_event(token, GRAPH["shared_mailbox_upn"], ev_id_raw)  # encodes internally
 
-                    res = supabase.table("events").select("id").eq("outlook_event_id", ev_id).limit(1).execute()
+                    # Try exact match first
+                    res = supabase.table("events").select("id").eq("outlook_event_id", ev_id_raw).limit(1).execute()
                     rows = res.data or []
+                    if not rows and ev.get("id"):
+                        # fall back: if user typed a different ID but we have a row selected, use it
+                        rows = [{"id": ev["id"]}]
+
                     if not rows:
                         st.warning("No local event matches this Outlook ID.")
                     else:
@@ -1524,6 +1554,7 @@ with st.sidebar:
                             st.success(f"Refreshed from Outlook → updated: {', '.join(updates.keys())}")
                 except Exception as e:
                     st.error(f"Refresh failed: {e}")
+
 
         st.divider()
 
