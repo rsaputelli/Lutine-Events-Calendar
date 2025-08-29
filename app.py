@@ -80,54 +80,6 @@ IANA_MAP = {
     "Hawaii": "Pacific/Honolulu",
 }
 
-# ----- Admin panel: Export to Word (always visible) -----
-with st.sidebar.expander("Admin: Export Events to Word", expanded=False):
-    # Filters for export (independent of page tabs)
-    default_from = date.today().replace(day=1)
-    default_to   = date.today() + timedelta(days=120)
-
-    ex_from = st.date_input("From (ET)", value=st.session_state.get("export_from", default_from), key="export_from")
-    ex_to   = st.date_input("To (ET)",   value=st.session_state.get("export_to", default_to),   key="export_to")
-
-    # Optional client filter
-    clients = load_clients()
-    ex_client = st.selectbox("Client (optional)", ["(all)"] + clients,
-                             index=st.session_state.get("export_client_idx", 0), key="export_client")
-
-    # Cache the export so repeat downloads are instant
-    @st.cache_data(ttl=300)
-    def _load_events_and_build_doc(from_d: date, to_d: date, client_filter: str) -> bytes:
-        # Fetch events (ET → UTC)
-        start_floor_utc = datetime.combine(from_d, time(0, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
-        end_ceil_utc    = datetime.combine(to_d,   time(23,59), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
-
-        q = supabase.table("events").select("*") \
-                 .gte("start_dt_utc", start_floor_utc.isoformat()) \
-                 .lte("start_dt_utc", end_ceil_utc.isoformat()) \
-                 .order("start_dt_utc", desc=False)
-        if client_filter and client_filter != "(all)":
-            q = q.eq("client", client_filter)
-        events = (q.execute().data or [])
-
-        return build_doc(events)  # uses your existing build_doc(...)
-
-    if st.button("Build Word"):
-        try:
-            doc_bytes = _load_events_and_build_doc(ex_from, ex_to, ex_client)
-            st.session_state["export_doc_bytes"] = doc_bytes
-            st.success("Export ready below.")
-        except Exception as e:
-            st.error(f"Export failed: {e}")
-
-    if "export_doc_bytes" in st.session_state:
-        st.download_button(
-            "Download Word (DOCX)",
-            data=st.session_state["export_doc_bytes"],
-            file_name=f"Lutine_Master_Calendar_{date.today().year}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            key="export_download_btn"
-        )
-
 
 # -----------------------------
 # Graph OAuth + Event Create
@@ -561,6 +513,54 @@ def fmt_event_info(subject: str, start_dt_et: datetime, end_dt_et: datetime,
 # UI – Create & Edit Tabs
 # -----------------------------
 tab_create, tab_edit = st.tabs(["Create", "Edit"])
+
+# ----- Admin panel: Export to Word (always visible) -----
+with st.sidebar.expander("Admin: Export Events to Word", expanded=False):
+    # Filters for export (independent of page tabs)
+    default_from = date.today().replace(day=1)
+    default_to   = date.today() + timedelta(days=120)
+
+    ex_from = st.date_input("From (ET)", value=st.session_state.get("export_from", default_from), key="export_from")
+    ex_to   = st.date_input("To (ET)",   value=st.session_state.get("export_to", default_to),   key="export_to")
+
+    # Optional client filter
+    clients = load_clients()
+    ex_client = st.selectbox("Client (optional)", ["(all)"] + clients,
+                             index=st.session_state.get("export_client_idx", 0), key="export_client")
+
+    # Cache the export so repeat downloads are instant
+    @st.cache_data(ttl=300)
+    def _load_events_and_build_doc(from_d: date, to_d: date, client_filter: str) -> bytes:
+        # Fetch events (ET → UTC)
+        start_floor_utc = datetime.combine(from_d, time(0, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+        end_ceil_utc    = datetime.combine(to_d,   time(23,59), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+
+        q = supabase.table("events").select("*") \
+                 .gte("start_dt_utc", start_floor_utc.isoformat()) \
+                 .lte("start_dt_utc", end_ceil_utc.isoformat()) \
+                 .order("start_dt_utc", desc=False)
+        if client_filter and client_filter != "(all)":
+            q = q.eq("client", client_filter)
+        events = (q.execute().data or [])
+
+        return build_doc(events)  # uses your existing build_doc(...)
+
+    if st.button("Build Word"):
+        try:
+            doc_bytes = _load_events_and_build_doc(ex_from, ex_to, ex_client)
+            st.session_state["export_doc_bytes"] = doc_bytes
+            st.success("Export ready below.")
+        except Exception as e:
+            st.error(f"Export failed: {e}")
+
+    if "export_doc_bytes" in st.session_state:
+        st.download_button(
+            "Download Word (DOCX)",
+            data=st.session_state["export_doc_bytes"],
+            file_name=f"Lutine_Master_Calendar_{date.today().year}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key="export_download_btn"
+        )
 
 # ==========
 # CREATE TAB
