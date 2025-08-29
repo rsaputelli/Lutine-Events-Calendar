@@ -1,1 +1,16 @@
+[server]
+# Always run headless in Streamlit Cloud
+headless = true
+
+[theme]
+base = "light"        # or "dark"
+primaryColor = "#004785"
+secondaryBackgroundColor = "#f5f5f5"
+textColor = "#000000"
+
+[client]
+toolbarMode = "viewer"   # hides "Get help" and "Report a bug"
+
+[ui]
+hideTopBar = false       # set true if you want to hide the hamburger menu
 
