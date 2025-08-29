@@ -32,7 +32,7 @@ st.set_page_config(page_title="Lutine Master Calendar Intake", layout="wide")
 # Header/logo (main page, replaces sidebar branding)
 logo_col, title_col = st.columns([1, 6])
 with logo_col:
-    st.image("assets/lutine-logo.png", width=220)
+    st.image("assets/lutine-logo.png", width=230)
 with title_col:
     st.title("Master Calendar Intake Form")
     st.caption("Use this form to add or edit Master Calendar")
@@ -1264,4 +1264,5 @@ with st.sidebar:
     #st.markdown("- Streamlit secrets: **graph**, **supabase**")
     #st.markdown("- Optional SMTP secrets for email: **smtp** (host, port, user, password, from_addr, from_name)")
     #st.caption("Time zones: stored as UTC + IANA; Graph uses Windows TZ IDs. Events are created with showAs=Free. Accreditation email sent if selected.")
+
 
