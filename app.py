@@ -57,11 +57,6 @@ supabase: Client | None = None
 if SUPA.get("url") and SUPA.get("key"):
     supabase = create_client(SUPA["url"], SUPA["key"])
     
-with st.expander("Email diagnostics", expanded=False):
-    test_to = st.text_input("Send a test email to:", value="")
-    if st.button("Send test email"):
-        ok, info = notify_via_graph_then_smtp([test_to], "Test from Lutine Master Calendar", "<p>This is a test.</p>")
-        st.success(f"✅ {info}") if ok else st.error(f"❌ {info}")
 
 # -----------------------------
 # Helper: Time zones (US) -> Windows TZ IDs for Graph
@@ -353,6 +348,24 @@ def fmt_event_info(subject: str, start_dt_et: datetime, end_dt_et: datetime,
         parts.append(f"<p><b>Meeting Manager:</b> {manager_name} {('<' + manager_email + '>') if manager_email else ''}</p>")
 
     return "\n".join(parts)
+    
+    
+# ---- Email diagnostics (place this AFTER notify_via_graph_then_smtp is defined) ----
+with st.expander("Email diagnostics", expanded=False):
+    test_to = st.text_input("Send a test email to:", value="")
+    if st.button("Send test email"):
+        if not test_to.strip():
+            st.warning("Enter a recipient email first.")
+        else:
+            try:
+                ok, info = notify_via_graph_then_smtp(
+                    [test_to.strip()],
+                    "Test from Lutine Master Calendar",
+                    "<p>This is a test.</p>"
+                )
+                st.success(f"✅ {info}") if ok else st.error(f"❌ {info}")
+            except Exception as e:
+                st.error(f"❌ Diagnostics failed: {e}")
 
 
 # -----------------------------
