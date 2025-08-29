@@ -958,10 +958,6 @@ with tab_edit:
         start_time_e = time(0, 0)
         end_time_e   = time(0, 0)
 
-    else:
-        start_time_e = time(0, 0)
-        end_time_e   = time(0, 0)
-
     # Event type & location/virtual
     event_type_e = st.selectbox("Event Type", ["In-person", "Virtual"], index=(0 if ev.get("event_type") == "in_person" else 1), key="edit_event_type")
     location_e = ""
@@ -1416,5 +1412,6 @@ with st.sidebar:
     #st.markdown("- Streamlit secrets: **graph**, **supabase**")
     #st.markdown("- Optional SMTP secrets for email: **smtp** (host, port, user, password, from_addr, from_name)")
     #st.caption("Time zones: stored as UTC + IANA; Graph uses Windows TZ IDs. Events are created with showAs=Free. Accreditation email sent if selected.")
+
 
 
