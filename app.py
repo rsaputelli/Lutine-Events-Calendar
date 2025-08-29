@@ -25,6 +25,8 @@ from email.mime.text import MIMEText
 from email.utils import formataddr
 
 import re, html, requests
+from docx.shared import RGBColor  # for red text
+
 
 # -----------------------------
 # Config & Secrets
@@ -182,6 +184,19 @@ def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, ma
     except Exception:
         return False
         
+def graph_datetime_obj(dt_local, *, tz_windows: str) -> dict:
+    """
+    Convert a timezone-aware local datetime to the MS Graph event datetime object.
+    Graph expects local wall time and a Windows time zone ID.
+    """
+    # Ensure dt_local is timezone-aware in the target local zone before formatting
+    if getattr(dt_local, "tzinfo", None) is None:
+        raise ValueError("dt_local must be timezone-aware")
+
+    return {
+        "dateTime": dt_local.strftime("%Y-%m-%dT%H:%M:%S"),
+        "timeZone": tz_windows,  # e.g., "Eastern Standard Time"
+    }
     
 
 # -----------------------------
@@ -958,6 +973,7 @@ with tab_edit:
         start_time_e = time(0, 0)
         end_time_e   = time(0, 0)
 
+
     # Event type & location/virtual
     event_type_e = st.selectbox("Event Type", ["In-person", "Virtual"], index=(0 if ev.get("event_type") == "in_person" else 1), key="edit_event_type")
     location_e = ""
@@ -1204,75 +1220,89 @@ else:
         end_str = _fmt_hhmm(end_et)
         return f" {start_str}–{end_str} {tz_label}"
 
-    def build_doc(events: list[dict]) -> bytes:
-        doc = Document()
-        title = doc.add_paragraph("Lutine Meetings Calendar")
-        title_format = title.runs[0].font
-        title_format.size = Pt(16)
-        title_format.bold = True
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+def build_doc(events: list[dict]) -> bytes:
+    doc = Document()
+    title = doc.add_paragraph("Lutine Meetings Calendar")
+    title_format = title.runs[0].font
+    title_format.size = Pt(16)
+    title_format.bold = True
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        grouped = {}
-        for ev in events:
-            try:
-                start_utc = datetime.fromisoformat(ev["start_dt_utc"].replace("Z", "+00:00"))
-            except Exception:
-                continue
-            start_et = start_utc.astimezone(ZoneInfo("America/New_York"))
-            key = month_key(start_et)
-            grouped.setdefault(key, []).append((start_et, ev))
+    grouped = {}
+    for ev in events:
+        try:
+            start_utc = datetime.fromisoformat(ev["start_dt_utc"].replace("Z", "+00:00"))
+        except Exception:
+            continue
+        start_et = start_utc.astimezone(ZoneInfo("America/New_York"))
+        key = month_key(start_et)
+        grouped.setdefault(key, []).append((start_et, ev))
 
-        for mon in sorted(grouped.keys(), key=lambda k: datetime.strptime(k, "%B %Y").date()):
-            doc.add_paragraph("")
-            h = doc.add_paragraph(mon)
-            h.runs[0].font.bold = True
+    # sort months chronologically
+    for mon in sorted(grouped.keys(), key=lambda k: datetime.strptime(k, "%B %Y").date()):
+        doc.add_paragraph("")  # spacing
+        h = doc.add_paragraph(mon)
+        h.runs[0].font.bold = True
 
-            # iterate events within this month
-            for start_et, ev in grouped[mon]:
-                end_utc = datetime.fromisoformat(ev["end_dt_utc"].replace("Z", "+00:00"))
-                end_et = end_utc.astimezone(ZoneInfo("America/New_York"))
-                is_all_day = bool(ev.get("is_all_day"))
-                month_abbr = start_et.strftime("%b")
-                day_num = start_et.day
-                time_win = fmt_time_window_local(start_et, end_et, is_all_day, tz_label="ET")
-                line_prefix = f"{month_abbr} {day_num}:{time_win} "
+        # iterate events within this month
+        for start_et, ev in grouped[mon]:
+            end_utc = datetime.fromisoformat(ev["end_dt_utc"].replace("Z", "+00:00"))
+            end_et = end_utc.astimezone(ZoneInfo("America/New_York"))
+            is_all_day = bool(ev.get("is_all_day"))
 
-                # Subject + (Client) + (Location/Virtual)
-                subject_core = ev.get("subject") or "(No subject)"
-                client_txt = ev.get("client") or ""
-                loc_or_v = ""
-                if ev.get("event_type") == "in_person" and ev.get("location"):
-                    loc_or_v = ev["location"]
-                elif ev.get("event_type") == "virtual":
-                    vp = (ev.get("virtual_provider") or "other").lower()
-                    loc_or_v = {"teams": "Teams", "zoom": "Zoom"}.get(vp, "Virtual")
+            # Line 1: Date/time + Client (client here; not in subject)
+            month_abbr = start_et.strftime("%b")
+            day_num = start_et.day
+            time_win = fmt_time_window_local(start_et, end_et, is_all_day, tz_label="ET")  # e.g., " 9:00–10:00 ET"
+            line1 = f"{month_abbr} {day_num}:{time_win}"
+            p1 = doc.add_paragraph(line1)
+            client_txt = ev.get("client") or ""
+            if client_txt:
+                r_client = p1.add_run(f" • Client: {client_txt}")
+                # (kept in normal styling)
 
-                subject_display = subject_core
-                if client_txt:
-                    subject_display += f" ({client_txt})"
-                if loc_or_v:
-                    subject_display += f" ({loc_or_v})"
+            # Line 2: Subject (+ location/virtual)
+            subject_core = ev.get("subject") or "(No subject)"
+            loc_or_v = ""
+            if ev.get("event_type") == "in_person" and ev.get("location"):
+                loc_or_v = ev["location"]
+            elif ev.get("event_type") == "virtual":
+                vp = (ev.get("virtual_provider") or "other").lower()
+                loc_or_v = {"teams": "Teams", "zoom": "Zoom"}.get(vp, "Virtual")
 
-                manager = ev.get("meeting_manager_name") or ""
-                acc = "Y" if ev.get("accreditation_required") else "N"
+            subject_display = subject_core
+            if loc_or_v:
+                subject_display += f" ({loc_or_v})"
 
-                tail_parts = []
-                if manager:
-                    tail_parts.append(f"– Meeting Manager: {manager}")
-                tail_parts.append(f"Accreditation: {acc}")
+            p2 = doc.add_paragraph(subject_display)
 
-                doc.add_paragraph(
-                    line_prefix
-                    + subject_display
-                    + (", " + ", ".join(tail_parts) if tail_parts else "")
-                )
+            # Line 3: Meeting Manager (red + bold) + Accreditation flag
+            manager = ev.get("meeting_manager_name") or ""
+            acc = "Y" if ev.get("accreditation_required") else "N"
 
-                doc.add_paragraph(line_prefix + subject_display + (", " + ", ".join(tail_parts) if tail_parts else ""))
+            p3 = doc.add_paragraph()
+            if manager:
+                r_mm_label = p3.add_run("Meeting Manager: ")
+                r_mm_label.bold = True
+                r_mm_label.font.color.rgb = RGBColor(192, 0, 0)  # red
 
+                r_mm_name = p3.add_run(manager)
+                r_mm_name.bold = True
+                r_mm_name.font.color.rgb = RGBColor(192, 0, 0)  # red
 
-        bio = io.BytesIO()
-        doc.save(bio)
-        return bio.getvalue()
+                p3.add_run("   ")  # small spacer
+
+            r_acc_label = p3.add_run("Accreditation: ")
+            r_acc_label.bold = True
+            p3.add_run(acc)
+
+            # Optional: add a small spacer line between events
+            # doc.add_paragraph("")
+    
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
 
     if st.button("Build Word Document"):
         if not events:
@@ -1412,6 +1442,5 @@ with st.sidebar:
     #st.markdown("- Streamlit secrets: **graph**, **supabase**")
     #st.markdown("- Optional SMTP secrets for email: **smtp** (host, port, user, password, from_addr, from_name)")
     #st.caption("Time zones: stored as UTC + IANA; Graph uses Windows TZ IDs. Events are created with showAs=Free. Accreditation email sent if selected.")
-
 
 
