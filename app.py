@@ -611,13 +611,48 @@ with tab_create:
 
         # Create in Outlook
         outlook_event_id = None
+        token = None
         try:
-            if missing: raise RuntimeError("Missing secrets; cannot call Microsoft Graph.")
+            if missing:
+                raise RuntimeError("Missing secrets; cannot call Microsoft Graph.")
             token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
             created = graph_create_event(token, GRAPH["shared_mailbox_upn"], payload)
             outlook_event_id = created.get("id")
         except Exception as e:
             st.error(f"Outlook create failed: {e}")
+
+        # Append the Outlook ID into the event body (notes)
+        try:
+            if outlook_event_id and token:
+                note_snippet = (
+                    f"<p style='color:#666;font-size:10px'>"
+                    f"[App Outlook Event ID: {outlook_event_id}]"
+                    f"</p>"
+                )
+                patch_url = (
+                    f"https://graph.microsoft.com/v1.0/users/"
+                    f"{GRAPH['shared_mailbox_upn']}/events/{outlook_event_id}"
+                )
+                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+                # Read current body so we can append without overwriting
+                get_resp = requests.get(patch_url, headers=headers, timeout=15)
+                get_resp.raise_for_status()
+                body_obj = get_resp.json().get("body", {}) or {}
+                cur_html = body_obj.get("content") or ""
+
+                # If the existing body was plain text, wrap it so we don't lose content
+                if body_obj.get("contentType") == "text" and cur_html:
+                    cur_html = f"<pre>{cur_html}</pre>"
+
+                new_html = cur_html + note_snippet
+                patch_payload = {"body": {"contentType": "HTML", "content": new_html}}
+                patch_resp = requests.patch(patch_url, headers=headers, json=patch_payload, timeout=15)
+                patch_resp.raise_for_status()
+        except Exception as e:
+            # Non-fatal; event exists even if we couldn't append the ID
+            st.warning(f"Could not append Outlook ID to notes: {e}")
+
 
         # Persist in Supabase
         inserted_event_id = None
@@ -870,9 +905,18 @@ with tab_edit:
     else:
         reminder_datetime_local_e = rem2c2.datetime_input("Reminder date & time", value=datetime.combine(date.today(), time(9,0)), key="edit_rem_dt")
 
+    # 👇 ADD THIS BLOCK *HERE* (just before the Save button)
+    st.text_input(
+        "Outlook Event ID",
+        value=ev.get("outlook_event_id") or "",
+        disabled=True,
+        key="edit_outlook_event_id_ro"
+    )
+
     if st.button("Save Changes", type="primary"):
         # Validate
         errs = []
+
         if not subject_e:
             errs.append("Event Title is required.")
         if event_type_e == "In-person" and not location_e:
@@ -1068,6 +1112,17 @@ else:
                 if manager:
                     tail_parts.append(f"– Meeting Manager: {manager}")
                 tail_parts.append(f"Accreditation: {acc}")
+                
+                # ✅ NEW: append Outlook Event ID at the end if present
+                oeid = ev.get("outlook_event_id")
+                if oeid:
+                    tail_parts.append(f"[ID: {oeid}]")
+
+                doc.add_paragraph(
+                    line_prefix
+                    + subject_display
+                    + (", " + ", ".join(tail_parts) if tail_parts else "")
+                )
 
                 doc.add_paragraph(line_prefix + subject_display + (", " + ", ".join(tail_parts) if tail_parts else ""))
 
