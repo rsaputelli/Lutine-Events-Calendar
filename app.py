@@ -80,6 +80,55 @@ IANA_MAP = {
     "Hawaii": "Pacific/Honolulu",
 }
 
+# ----- Admin panel: Export to Word (always visible) -----
+with st.sidebar.expander("Admin: Export Events to Word", expanded=False):
+    # Filters for export (independent of page tabs)
+    default_from = date.today().replace(day=1)
+    default_to   = date.today() + timedelta(days=120)
+
+    ex_from = st.date_input("From (ET)", value=st.session_state.get("export_from", default_from), key="export_from")
+    ex_to   = st.date_input("To (ET)",   value=st.session_state.get("export_to", default_to),   key="export_to")
+
+    # Optional client filter
+    clients = load_clients()
+    ex_client = st.selectbox("Client (optional)", ["(all)"] + clients,
+                             index=st.session_state.get("export_client_idx", 0), key="export_client")
+
+    # Cache the export so repeat downloads are instant
+    @st.cache_data(ttl=300)
+    def _load_events_and_build_doc(from_d: date, to_d: date, client_filter: str) -> bytes:
+        # Fetch events (ET → UTC)
+        start_floor_utc = datetime.combine(from_d, time(0, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+        end_ceil_utc    = datetime.combine(to_d,   time(23,59), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+
+        q = supabase.table("events").select("*") \
+                 .gte("start_dt_utc", start_floor_utc.isoformat()) \
+                 .lte("start_dt_utc", end_ceil_utc.isoformat()) \
+                 .order("start_dt_utc", desc=False)
+        if client_filter and client_filter != "(all)":
+            q = q.eq("client", client_filter)
+        events = (q.execute().data or [])
+
+        return build_doc(events)  # uses your existing build_doc(...)
+
+    if st.button("Build Word"):
+        try:
+            doc_bytes = _load_events_and_build_doc(ex_from, ex_to, ex_client)
+            st.session_state["export_doc_bytes"] = doc_bytes
+            st.success("Export ready below.")
+        except Exception as e:
+            st.error(f"Export failed: {e}")
+
+    if "export_doc_bytes" in st.session_state:
+        st.download_button(
+            "Download Word (DOCX)",
+            data=st.session_state["export_doc_bytes"],
+            file_name=f"Lutine_Master_Calendar_{date.today().year}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key="export_download_btn"
+        )
+
+
 # -----------------------------
 # Graph OAuth + Event Create
 # -----------------------------
@@ -122,14 +171,11 @@ def graph_delete_event(token: str, shared_mailbox_upn: str, outlook_event_id: st
     if r.status_code not in (204, 404):
         raise RuntimeError(f"Graph DELETE {r.status_code}: {r.text}")
         
-import re, html, requests
-
-import re, html, requests
 
 def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, mailbox_upn: str, token: str) -> bool:
     """
-    Ensure exactly ONE 'Meeting Manager + [App Outlook Event ID: …]' block exists.
-    Removes any legacy variants (p/div/span/table) and inserts a single 11pt table block.
+    Ensure exactly ONE 'Meeting Manager + [App Outlook Event ID: …]' block.
+    Strips any legacy p/div/span/table blocks regardless of styling, then appends one 11pt table block.
     """
     try:
         get_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_upn}/events/{outlook_event_id}"
@@ -149,23 +195,25 @@ def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, ma
         m_id = re.search(r"\[(?:App\s+)?Outlook\s+Event\s+ID:?\s*(?P<eid>[^\]]+)\]", cur_html, flags=re.I)
         preserved_id = (m_id.group("eid").strip() if m_id else "") or outlook_event_id
 
-        # 3) Remove ANY existing Manager blocks (broad patterns, style-agnostic)
-        #    a) whole tables that contain both phrases
+        # 3) Remove ANY existing Manager block variants (tables, blocks, mixed wrappers)
+        # a) any <table> ... contains both phrases
         pat_table = re.compile(r"<table\b.*?>.*?Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].*?</table>",
                                re.I | re.S)
-        #    b) any single block tag that contains both phrases
+        # b) any block tag (p/div/span/td) containing both phrases
         pat_block = re.compile(r"<(?P<tag>p|div|span|td)\b[^>]*>.*?Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].*?</(?P=tag)>",
                                re.I | re.S)
+        # c) belt-and-suspenders: inline fragment (manager … ID …) across tags within ~1500 chars
+        pat_inline = re.compile(r"Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].{0,50}", re.I | re.S)
 
-        # remove repeatedly until stable (handles nested wrappers Outlook may add)
         changed = True
         while changed:
             new_html = pat_table.sub("", cur_html)
             new_html = pat_block.sub("", new_html)
+            new_html = pat_inline.sub("", new_html)
             changed = (new_html != cur_html)
             cur_html = new_html
 
-        # 4) Append ONE normalized block (1-cell table, 11pt)
+        # 4) Append ONE normalized 11pt table block (Outlook-friendly)
         safe_mgr = html.escape(manager_name)
         safe_id  = html.escape(preserved_id)
         block = (
@@ -177,7 +225,6 @@ def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, ma
         )
         new_html = cur_html + block
 
-        # 5) Patch back
         p = requests.patch(
             get_url,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
@@ -189,6 +236,7 @@ def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, ma
 
     except Exception:
         return False
+
 
 
         
@@ -926,6 +974,46 @@ with tab_edit:
     options = [f"{ev['subject']} • {ev.get('client') or ''} • {ev['start_dt_utc'][:16]}" for ev in edit_events]
     sel_idx = st.selectbox("Pick an event to edit", list(range(len(options))), format_func=lambda i: options[i], key="edit_pick")
     ev = edit_events[sel_idx]
+    # --- Seed session_state from the selected event (only when selection changes) ---
+    selected_id = ev["id"]
+    prev_selected = st.session_state.get("edit_selected_id")
+    if prev_selected != selected_id:
+        st.session_state["edit_selected_id"] = selected_id
+
+        # Convert stored UTC to the event's local tz for seeding
+        iana_e = ev.get("timezone_display") or "America/New_York"
+        tz_e = ZoneInfo(iana_e)
+        start_e_utc = datetime.fromisoformat(ev["start_dt_utc"].replace("Z", "+00:00"))
+        end_e_utc   = datetime.fromisoformat(ev["end_dt_utc"].replace("Z", "+00:00"))
+        start_e = start_e_utc.astimezone(tz_e)
+        end_e   = end_e_utc.astimezone(tz_e)
+
+        # Find the matching Windows tz key you use in the UI (reverse IANA->label)
+        # This assumes you have IANA_MAP and TZ_MAP (Windows label -> Windows name) already.
+        # If you have a map from tz label -> IANA in IANA_MAP, reverse it:
+        tz_label_from_iana = next((label for label, iana in IANA_MAP.items() if iana == iana_e), list(TZ_MAP.keys())[0])
+        st.session_state["edit_tz_choice"] = tz_label_from_iana
+
+        st.session_state["edit_is_all_day"] = bool(ev.get("is_all_day"))
+
+        # Seed dates/times
+        st.session_state["edit_start_date"] = start_e.date()
+        st.session_state["edit_end_date"]   = (end_e - timedelta(days=1)).date() if ev.get("is_all_day") else end_e.date()
+        st.session_state["edit_start_time"] = start_e.time().replace(second=0, microsecond=0)
+        st.session_state["edit_end_time"]   = (time(0,0) if ev.get("is_all_day") else end_e.time().replace(second=0, microsecond=0))
+
+        # Seed reminder widgets sensibly
+        mins = int(ev.get("reminder_minutes") or 0)
+        if mins >= 1440:
+            st.session_state["edit_rem_mode"] = "Days before start (Outlook)"
+            st.session_state["edit_reminder_days"] = max(1, mins // 1440)
+        elif mins > 0:
+            st.session_state["edit_rem_mode"] = "Minutes before start (Outlook)"
+            st.session_state["edit_reminder_minutes"] = mins
+        else:
+            st.session_state["edit_rem_mode"] = "On date/time (Email via app)"
+            st.session_state["edit_reminder_datetime_local"] = datetime.combine(date.today(), time(9,0))
+    
     st.markdown("### Danger Zone")
     c1, c2 = st.columns([1, 3])
     confirm_del = c1.checkbox("Yes, delete this event", key="confirm_delete_ev")
@@ -964,23 +1052,26 @@ with tab_edit:
 
     # Top controls
     top_cols = st.columns(3)
-    tz_choice_e = top_cols[0].selectbox("Time Zone", list(TZ_MAP.keys()), index=0, key="edit_tz")
-    is_all_day_e = top_cols[1].checkbox("All-Day Event", value=is_all_day_e, key="edit_is_all_day")
+    tz_choice_e = top_cols[0].selectbox(
+        "Time Zone",
+        list(TZ_MAP.keys()),
+        index=list(TZ_MAP.keys()).index(st.session_state["edit_tz_choice"]),
+        key="edit_tz_choice"
+    )
+    is_all_day_e = top_cols[1].checkbox("All-Day Event", key="edit_is_all_day")
 
-    # Date & time
+    # Dates
     colD1, colD2 = st.columns(2)
-    start_date_e = colD1.date_input("Start Date", value=start_e.date(), key="edit_start_date")
-    end_date_e   = colD2.date_input("End Date",   value=(end_e - (timedelta(days=1) if is_all_day_e else timedelta(0))).date(), key="edit_end_date")
+    start_date_e = colD1.date_input("Start Date", key="edit_start_date")
+    end_date_e   = colD2.date_input("End Date",   key="edit_end_date")
 
+    # Times (typing allowed, not dropdown-only)
     if not is_all_day_e:
-        start_time_e = st.time_input("Start Time", value=start_e.time().replace(second=0, microsecond=0),
-                                     key="edit_start_time", step=timedelta(minutes=5))
-        end_time_e   = st.time_input("End Time",   value=end_e.time().replace(second=0, microsecond=0),
-                                     key="edit_end_time",   step=timedelta(minutes=5))
+        start_time_e = st.time_input("Start Time", key="edit_start_time", step=timedelta(minutes=5))
+        end_time_e   = st.time_input("End Time",   key="edit_end_time",   step=timedelta(minutes=5))
     else:
         start_time_e = time(0, 0)
         end_time_e   = time(0, 0)
-
 
     # Event type & location/virtual
     event_type_e = st.selectbox("Event Type", ["In-person", "Virtual"], index=(0 if ev.get("event_type") == "in_person" else 1), key="edit_event_type")
@@ -1200,8 +1291,7 @@ with tab_edit:
             st.session_state["edit_client"] = "(all)"
         except Exception:
             pass        
-        st.rerun()
-
+  
 # -----------------------------
 # Export to Word (grouped by month)
 # -----------------------------
