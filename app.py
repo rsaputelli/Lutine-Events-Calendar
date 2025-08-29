@@ -290,26 +290,42 @@ def graph_get_event(token: str, shared_mailbox_upn: str, event_id: str) -> dict:
 # ---------- Graph delta (calendarView) ----------
 def graph_delta_events(token: str, shared_mailbox_upn: str, start_iso: str | None, end_iso: str | None, delta_link: str | None = None):
     """
-    If delta_link is provided, call it directly.
-    Otherwise, call calendarView/delta with start/end window (ISO8601).
-    Yields pages dicts; each page may contain '@odata.nextLink' or '@odata.deltaLink'.
+    If delta_link is provided, call it directly (it already includes query params).
+    Otherwise, call calendarView/delta with a UTC window using requests' params= to ensure proper URL encoding.
+    Yields page dicts; each page may contain '@odata.nextLink' or '@odata.deltaLink'.
     """
     headers = {"Authorization": f"Bearer {token}"}
+
     if delta_link:
         next_url = delta_link
-    else:
-        base = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/calendarView/delta"
-        params = {"startDateTime": start_iso, "endDateTime": end_iso}
-        next_url = base + "?" + "&".join([f"{k}={params[k]}" for k in params if params[k]])
+        while next_url:
+            r = requests.get(next_url, headers=headers, timeout=30)
+            if r.status_code >= 400:
+                raise RuntimeError(f"Graph delta {r.status_code}: {r.text}")
+            page = r.json()
+            yield page
+            next_url = page.get("@odata.nextLink")
+        return
 
-    while next_url:
-        r = requests.get(next_url, headers=headers, timeout=30)
+    # First-time windowed delta (encode params properly)
+    base = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/calendarView/delta"
+    params = {}
+    if start_iso: params["startDateTime"] = start_iso
+    if end_iso:   params["endDateTime"] = end_iso
+
+    next_link = None
+    while True:
+        if next_link:
+            r = requests.get(next_link, headers=headers, timeout=30)
+        else:
+            r = requests.get(base, headers=headers, params=params, timeout=30)
         if r.status_code >= 400:
             raise RuntimeError(f"Graph delta {r.status_code}: {r.text}")
         page = r.json()
         yield page
-        next_url = page.get("@odata.nextLink")
-        # if nextLink absent and deltaLink present, caller should persist deltaLink
+        next_link = page.get("@odata.nextLink")
+        if not next_link:
+            break
   
 # ---------- Outlook → App field mapping helpers ----------
 from zoneinfo import ZoneInfo
