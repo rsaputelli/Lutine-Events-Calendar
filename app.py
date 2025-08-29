@@ -217,13 +217,20 @@ def graph_datetime_obj(dt_local, *, tz_windows: str) -> dict:
         "timeZone": tz_windows,  # e.g., "Eastern Standard Time"
     }
  # --- Helper: upsert Client + Accreditation lines in Outlook body (keeps Manager block untouched) ---
+import re, html as _html, requests
+from urllib.parse import quote
+
 def upsert_outlook_client_and_accreditation(*, token: str, mailbox_upn: str, event_id: str,
-                                            client_value: str | None, accreditation_required: bool) -> bool:
+                                            client_value: str | None, accreditation_required: bool,
+                                            remove_virtual_line: bool = True) -> bool:
     """
-    Ensures the Outlook body has (and updates) two lines placed before the manager block:
-      <p><b>Client:</b> ...</p>
-      <p><b>Accreditation:</b> Yes|No</p>
-    Preserves the existing red Meeting Manager table and everything else.
+    Normalize Outlook body to have EXACTLY ONE:
+      - <p><b>Client:</b> ...</p>   (if client provided)
+      - <p><b>Accreditation:</b> Yes|No</p>
+    placed immediately BEFORE the Meeting Manager block.
+    Removes ALL legacy Client/Accreditation lines (incl. 'Accreditation Required:') and
+    (optionally) removes any 'Virtual:' line left from older creates.
+    Leaves the red Meeting Manager block intact.
     """
     try:
         get_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_upn}/events/{quote(event_id, safe='')}"
@@ -245,9 +252,10 @@ def upsert_outlook_client_and_accreditation(*, token: str, mailbox_upn: str, eve
         acc_flag = "Yes" if accreditation_required else "No"
         desired_acc = f"<p><b>Accreditation:</b> {acc_flag}</p>"
 
-        # Tolerant matchers
+        # Broad, style-agnostic patterns
         re_client = re.compile(r"<p[^>]*>\s*<b>\s*Client\s*:\s*</b>\s*.*?</p>", re.I | re.S)
-        re_acc = re.compile(r"<p[^>]*>\s*<b>\s*Accreditation(?: Required)?\s*:\s*</b>\s*(Yes|No)\s*</p>", re.I | re.S)
+        re_acc    = re.compile(r"<p[^>]*>\s*<b>\s*Accreditation(?: Required)?\s*:\s*</b>\s*(Yes|No)\s*</p>", re.I | re.S)
+        re_virtual= re.compile(r"<p[^>]*>\s*<b>\s*Virtual\s*:\s*</b>\s*.*?</p>", re.I | re.S)
         re_mgr_anchor = re.compile(
             r"(?i)(?:<table\b[^>]*>.*?Meeting\s*Manager:.*?</table>)|"
             r"(?:<p\b[^>]*>.*?Meeting\s*Manager:.*?</p>)|"
@@ -257,38 +265,27 @@ def upsert_outlook_client_and_accreditation(*, token: str, mailbox_upn: str, eve
             re.S
         )
 
-        # Insert/replace Client line
+        # 1) Strip ALL existing client/accreditation (and optional legacy Virtual) lines everywhere
+        html_in = re_client.sub("", html_in)
+        html_in = re_acc.sub("", html_in)
+        if remove_virtual_line:
+            html_in = re_virtual.sub("", html_in)
+
+        # 2) Prepare the combined insertion (client is optional)
+        insert_block = (desired_client + desired_acc) if desired_client else desired_acc
+
+        # 3) Insert immediately BEFORE the manager anchor if present; else prepend
         m_anchor = re_mgr_anchor.search(html_in)
-        if desired_client:
-            if re_client.search(html_in):
-                html_in = re_client.sub(desired_client, html_in, count=1)
-            else:
-                if m_anchor:
-                    html_in = html_in[:m_anchor.start()] + desired_client + html_in[m_anchor.start():]
-                else:
-                    html_in = desired_client + html_in
+        if m_anchor:
+            html_out = html_in[:m_anchor.start()] + insert_block + html_in[m_anchor.start():]
         else:
-            html_in = re_client.sub("", html_in)
+            html_out = insert_block + html_in
 
-        # Insert/replace Accreditation line
-        if re_acc.search(html_in):
-            html_in = re_acc.sub(desired_acc, html_in, count=1)
-        else:
-            m_anchor = re_mgr_anchor.search(html_in)  # re-find after client change
-            if m_anchor:
-                html_in = html_in[:m_anchor.start()] + desired_acc + html_in[m_anchor.start():]
-            else:
-                # try to place after client; else prepend
-                m_client = re_client.search(html_in)
-                if m_client:
-                    html_in = html_in[:m_client.end()] + desired_acc + html_in[m_client.end():]
-                else:
-                    html_in = desired_acc + html_in
-
+        # 4) Patch back
         p = requests.patch(
             get_url,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"body": {"contentType": "HTML", "content": html_in}},
+            json={"body": {"contentType": "HTML", "content": html_out}},
             timeout=20,
         )
         p.raise_for_status()
