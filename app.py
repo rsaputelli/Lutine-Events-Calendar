@@ -29,6 +29,7 @@ from docx.shared import RGBColor  # for red text
 from urllib.parse import quote
 import re, html as _html, requests
 from urllib.parse import quote
+from docx.enum.table import WD_TABLE_ALIGNMENT
 
 # -----------------------------
 # Config & Secrets
@@ -1419,18 +1420,11 @@ def build_doc(events: list[dict]) -> bytes:
             end_et = end_utc.astimezone(ZoneInfo("America/New_York"))
             is_all_day = bool(ev.get("is_all_day"))
 
-            # Line 1: Date/time + Client (client here; not in subject)
+            # pieces used in the card
             month_abbr = start_et.strftime("%b")
             day_num = start_et.day
             time_win = fmt_time_window_local(start_et, end_et, is_all_day, tz_label="ET")  # e.g., " 9:00–10:00 ET"
-            line1 = f"{month_abbr} {day_num}:{time_win}"
-            p1 = doc.add_paragraph(line1)
-            client_txt = ev.get("client") or ""
-            if client_txt:
-                r_client = p1.add_run(f" • Client: {client_txt}")
-                # (kept in normal styling)
 
-            # Line 2: Subject (+ location/virtual)
             subject_core = ev.get("subject") or "(No subject)"
             loc_or_v = ""
             if ev.get("event_type") == "in_person" and ev.get("location"):
@@ -1439,25 +1433,41 @@ def build_doc(events: list[dict]) -> bytes:
                 vp = (ev.get("virtual_provider") or "other").lower()
                 loc_or_v = {"teams": "Teams", "zoom": "Zoom"}.get(vp, "Virtual")
 
-            subject_display = subject_core
-            if loc_or_v:
-                subject_display += f" ({loc_or_v})"
+            subject_display = subject_core + (f" ({loc_or_v})" if loc_or_v else "")
 
-            p2 = doc.add_paragraph(subject_display)
-
-            # Line 3: Meeting Manager (red + bold) + Accreditation flag
+            client_txt = ev.get("client") or ""
             manager = ev.get("meeting_manager_name") or ""
             acc = "Y" if ev.get("accreditation_required") else "N"
 
-            p3 = doc.add_paragraph()
+            # ---------- Card (1-cell table with border) ----------
+            table = doc.add_table(rows=1, cols=1)
+            table.style = "Table Grid"       # adds a thin border
+            table.alignment = WD_TABLE_ALIGNMENT.LEFT
+            cell = table.cell(0, 0)
+
+            # Optional: a little padding via blank first paragraph removal
+            cell.text = ""  # ensure empty to control paragraphs
+
+            # Line 1: Date/time + Client
+            p1 = cell.add_paragraph()
+            r1 = p1.add_run(f"{month_abbr} {day_num}:{time_win}")
+            if client_txt:
+                p1.add_run(f" • Client: {client_txt}")
+
+            # Line 2: Subject (+ location/virtual)
+            p2 = cell.add_paragraph()
+            p2.add_run(subject_display).bold = True
+
+            # Line 3: Meeting Manager (red + bold) + Accreditation
+            p3 = cell.add_paragraph()
             if manager:
                 r_mm_label = p3.add_run("Meeting Manager: ")
                 r_mm_label.bold = True
-                r_mm_label.font.color.rgb = RGBColor(192, 0, 0)  # red
+                r_mm_label.font.color.rgb = RGBColor(192, 0, 0)  # #c00000
 
                 r_mm_name = p3.add_run(manager)
                 r_mm_name.bold = True
-                r_mm_name.font.color.rgb = RGBColor(192, 0, 0)  # red
+                r_mm_name.font.color.rgb = RGBColor(192, 0, 0)
 
                 p3.add_run("   ")  # small spacer
 
@@ -1465,8 +1475,9 @@ def build_doc(events: list[dict]) -> bytes:
             r_acc_label.bold = True
             p3.add_run(acc)
 
-            # Optional: add a small spacer line between events
-            # doc.add_paragraph("")
+            # spacing after each card
+            doc.add_paragraph("")
+
     
     bio = io.BytesIO()
     doc.save(bio)
