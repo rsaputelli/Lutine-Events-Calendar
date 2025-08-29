@@ -27,7 +27,8 @@ from email.utils import formataddr
 import re, html, requests
 from docx.shared import RGBColor  # for red text
 from urllib.parse import quote
-
+import re, html as _html, requests
+from urllib.parse import quote
 
 # -----------------------------
 # Config & Secrets
@@ -215,7 +216,87 @@ def graph_datetime_obj(dt_local, *, tz_windows: str) -> dict:
         "dateTime": dt_local.strftime("%Y-%m-%dT%H:%M:%S"),
         "timeZone": tz_windows,  # e.g., "Eastern Standard Time"
     }
-    
+ # --- Helper: upsert Client + Accreditation lines in Outlook body (keeps Manager block untouched) ---
+def upsert_outlook_client_and_accreditation(*, token: str, mailbox_upn: str, event_id: str,
+                                            client_value: str | None, accreditation_required: bool) -> bool:
+    """
+    Ensures the Outlook body has (and updates) two lines placed before the manager block:
+      <p><b>Client:</b> ...</p>
+      <p><b>Accreditation:</b> Yes|No</p>
+    Preserves the existing red Meeting Manager table and everything else.
+    """
+    try:
+        get_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_upn}/events/{quote(event_id, safe='')}"
+        hdrs = {"Authorization": f"Bearer {token}"}
+        r = requests.get(get_url, headers=hdrs, timeout=15)
+        r.raise_for_status()
+        body = (r.json() or {}).get("body", {}) or {}
+        ctype = (body.get("contentType") or "html").lower()
+        cur_html = body.get("content") or ""
+        if ctype == "text" and cur_html:
+            from html import escape as _esc
+            cur_html = f"<pre>{_esc(cur_html)}</pre>"
+
+        html_in = cur_html
+
+        # Build desired lines
+        safe_client = _html.escape(client_value) if client_value else ""
+        desired_client = f"<p><b>Client:</b> {safe_client}</p>" if safe_client else ""
+        acc_flag = "Yes" if accreditation_required else "No"
+        desired_acc = f"<p><b>Accreditation:</b> {acc_flag}</p>"
+
+        # Tolerant matchers
+        re_client = re.compile(r"<p[^>]*>\s*<b>\s*Client\s*:\s*</b>\s*.*?</p>", re.I | re.S)
+        re_acc    = re.compile(r"<p[^>]*>\s*<b>\s*Accreditation\s*:\s*</b>\s*(Yes|No)\s*</p>", re.I | re.S)
+        re_mgr_anchor = re.compile(
+            r"(?i)(?:<table\b[^>]*>.*?Meeting\s*Manager:.*?</table>)|"
+            r"(?:<p\b[^>]*>.*?Meeting\s*Manager:.*?</p>)|"
+            r"(?:<div\b[^>]*>.*?Meeting\s*Manager:.*?</div>)|"
+            r"(?:<span\b[^>]*>.*?Meeting\s*Manager:.*?</span>)|"
+            r"(?:<td\b[^>]*>.*?Meeting\s*Manager:.*?</td>)",
+            re.S
+        )
+
+        # Insert/replace Client line
+        m_anchor = re_mgr_anchor.search(html_in)
+        if desired_client:
+            if re_client.search(html_in):
+                html_in = re_client.sub(desired_client, html_in, count=1)
+            else:
+                if m_anchor:
+                    html_in = html_in[:m_anchor.start()] + desired_client + html_in[m_anchor.start():]
+                else:
+                    html_in = desired_client + html_in
+        else:
+            html_in = re_client.sub("", html_in)
+
+        # Insert/replace Accreditation line
+        if re_acc.search(html_in):
+            html_in = re_acc.sub(desired_acc, html_in, count=1)
+        else:
+            m_anchor = re_mgr_anchor.search(html_in)  # re-find after client change
+            if m_anchor:
+                html_in = html_in[:m_anchor.start()] + desired_acc + html_in[m_anchor.start():]
+            else:
+                # try to place after client; else prepend
+                m_client = re_client.search(html_in)
+                if m_client:
+                    html_in = html_in[:m_client.end()] + desired_acc + html_in[m_client.end():]
+                else:
+                    html_in = desired_acc + html_in
+
+        p = requests.patch(
+            get_url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"body": {"contentType": "HTML", "content": html_in}},
+            timeout=20,
+        )
+        p.raise_for_status()
+        return True
+
+    except Exception:
+        return False
+   
 
 # -----------------------------
 # Email helpers (optional)
