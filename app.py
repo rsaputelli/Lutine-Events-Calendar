@@ -260,6 +260,116 @@ def load_managers() -> List[Tuple[str, str]]:
         return [(r["name"], r.get("email", "")) for r in (res.data or [])]
     except Exception:
         return []
+        
+# ---- Graph delta bookmark helpers (Supabase) ----
+def get_delta_link(scope: str = "default") -> str | None:
+    if supabase is None:
+        return None
+    res = supabase.table("graph_state").select("delta_link").eq("scope", scope).limit(1).execute()
+    rows = res.data or []
+    return rows[0]["delta_link"] if rows and rows[0].get("delta_link") else None
+
+def save_delta_link(delta_link: str, scope: str = "default") -> None:
+    if supabase is None:
+        return
+    supabase.table("graph_state").upsert({
+        "scope": scope,
+        "delta_link": delta_link,
+        "last_synced": datetime.utcnow().isoformat()
+    }, on_conflict="scope").execute()
+    
+# ---------- Graph GET single event ----------
+def graph_get_event(token: str, shared_mailbox_upn: str, event_id: str) -> dict:
+    url = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/events/{event_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    r = requests.get(url, headers=headers, timeout=20)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Graph getEvent {r.status_code}: {r.text}")
+    return r.json()
+
+# ---------- Graph delta (calendarView) ----------
+def graph_delta_events(token: str, shared_mailbox_upn: str, start_iso: str | None, end_iso: str | None, delta_link: str | None = None):
+    """
+    If delta_link is provided, call it directly.
+    Otherwise, call calendarView/delta with start/end window (ISO8601).
+    Yields pages dicts; each page may contain '@odata.nextLink' or '@odata.deltaLink'.
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    if delta_link:
+        next_url = delta_link
+    else:
+        base = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/calendarView/delta"
+        params = {"startDateTime": start_iso, "endDateTime": end_iso}
+        next_url = base + "?" + "&".join([f"{k}={params[k]}" for k in params if params[k]])
+
+    while next_url:
+        r = requests.get(next_url, headers=headers, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Graph delta {r.status_code}: {r.text}")
+        page = r.json()
+        yield page
+        next_url = page.get("@odata.nextLink")
+        # if nextLink absent and deltaLink present, caller should persist deltaLink
+  
+# ---------- Outlook → App field mapping helpers ----------
+from zoneinfo import ZoneInfo
+from datetime import datetime
+
+def _parse_graph_dt_to_utc(dt_obj: dict) -> str | None:
+    """
+    Convert Graph dateTime dict -> UTC ISO string.
+    Accepts values like:
+      {"dateTime":"2025-09-01T09:00:00.0000000","timeZone":"Eastern Standard Time"}
+    Logic:
+      - If string has a 'Z' or offset, we trust it and convert to UTC.
+      - If naive, treat as UTC (safe fallback for our use case).
+    """
+    if not dt_obj or not dt_obj.get("dateTime"):
+        return None
+    dt_raw = dt_obj["dateTime"]
+    try:
+        dt = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.astimezone(ZoneInfo("UTC")).isoformat()
+    except Exception:
+        return None
+
+def map_graph_event_to_row_updates(g: dict) -> dict:
+    """
+    Return ONLY the Outlook-owned fields you want to overwrite in 'events'.
+    Internal app fields (deliverables, accreditation, manager, etc.) are untouched.
+    """
+    updates = {}
+
+    # Subject (optional—enable if you want Outlook title to win)
+    subj = g.get("subject")
+    if subj:
+        updates["subject"] = subj
+
+    # All-day
+    updates["is_all_day"] = bool(g.get("isAllDay"))
+
+    # Start/End (UTC ISO)
+    start_utc = _parse_graph_dt_to_utc(g.get("start"))
+    end_utc   = _parse_graph_dt_to_utc(g.get("end"))
+    if start_utc: updates["start_dt_utc"] = start_utc
+    if end_utc:   updates["end_dt_utc"] = end_utc
+
+    # Location (only physical display name)
+    loc = (g.get("location") or {}).get("displayName") or ""
+    if loc:
+        updates["location"] = loc
+
+    # Teams/online meeting URL → virtual_link (only fill/refresh the link)
+    om = g.get("onlineMeeting")
+    if isinstance(om, dict):
+        join_url = om.get("joinUrl")
+        if join_url:
+            updates["virtual_link"] = join_url
+
+    return updates
+      
 
 # -----------------------------
 # Formatting helper for emails
@@ -961,6 +1071,84 @@ else:
                 file_name=f"Lutine_Master_Calendar_{date.today().year}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
+
+# -----------------------------
+# Admin Tools (stub)
+# -----------------------------
+with st.expander("Admin Tools", expanded=False):
+    st.caption("Administrative utilities for calendar sync and cleanup.")
+
+    if st.button("🔄 Bulk Sync Now (Outlook → App)"):
+        try:
+            token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+            dlink = get_delta_link()  # None if first time
+            # If first-time, choose a window (e.g., last 180 days through +365 days)
+            if not dlink:
+                from datetime import datetime, timedelta, timezone
+                start_iso = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
+                end_iso   = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+            else:
+                start_iso = end_iso = None
+
+            total_updates = 0
+            last_delta = None
+            for page in graph_delta_events(token, GRAPH["shared_mailbox_upn"], start_iso, end_iso, delta_link=dlink):
+                values = page.get("value", [])
+                for g in values:
+                    # Skip deletes (delta may return @removed)
+                    if "@removed" in g:
+                        # if you want, you can also delete local rows here by outlook_event_id
+                        continue
+                    oeid = g.get("id")
+                    if not oeid:
+                        continue
+                    # find local row
+                    res = supabase.table("events").select("id").eq("outlook_event_id", oeid).limit(1).execute()
+                    rows = res.data or []
+                    if not rows:
+                        # not created by app? you may ignore or insert – here we ignore
+                        continue
+                    row_id = rows[0]["id"]
+                    updates = map_graph_event_to_row_updates(g)
+                    if updates:
+                        updates["updated_at"] = datetime.utcnow().isoformat()
+                        supabase.table("events").update(updates).eq("id", row_id).execute()
+                        total_updates += 1
+
+                # handle paging tokens
+                last_delta = page.get("@odata.deltaLink") or last_delta
+
+            if last_delta:
+                save_delta_link(last_delta)
+            st.success(f"Bulk sync complete. Updated {total_updates} event(s).")
+        except Exception as e:
+            st.error(f"Bulk sync failed: {e}")
+    
+    selected_event_id = st.text_input("Event ID for Refresh (Outlook ID)", value="")
+    if st.button("🔃 Refresh Selected Event from Outlook"):
+        ev_id = selected_event_id.strip()
+        if not ev_id:
+            st.warning("Enter an Outlook event ID first.")
+        else:
+            try:
+                token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+                g = graph_get_event(token, GRAPH["shared_mailbox_upn"], ev_id)
+                # Find corresponding DB row
+                res = supabase.table("events").select("id, outlook_event_id").eq("outlook_event_id", ev_id).limit(1).execute()
+                rows = res.data or []
+                if not rows:
+                    st.warning("No local event matches this Outlook ID.")
+                else:
+                    row_id = rows[0]["id"]
+                    updates = map_graph_event_to_row_updates(g)
+                    if not updates:
+                        st.info("No Outlook-owned fields to update.")
+                    else:
+                        updates["updated_at"] = datetime.utcnow().isoformat()
+                        supabase.table("events").update(updates).eq("id", row_id).execute()
+                        st.success(f"Refreshed from Outlook → updated fields: {', '.join(updates.keys())}")
+            except Exception as e:
+                st.error(f"Refresh failed: {e}")
 
 
 # -----------------------------
