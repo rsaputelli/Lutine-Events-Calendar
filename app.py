@@ -247,7 +247,7 @@ def upsert_outlook_client_and_accreditation(*, token: str, mailbox_upn: str, eve
 
         # Tolerant matchers
         re_client = re.compile(r"<p[^>]*>\s*<b>\s*Client\s*:\s*</b>\s*.*?</p>", re.I | re.S)
-        re_acc    = re.compile(r"<p[^>]*>\s*<b>\s*Accreditation\s*:\s*</b>\s*(Yes|No)\s*</p>", re.I | re.S)
+        re_acc = re.compile(r"<p[^>]*>\s*<b>\s*Accreditation(?: Required)?\s*:\s*</b>\s*(Yes|No)\s*</p>", re.I | re.S)
         re_mgr_anchor = re.compile(
             r"(?i)(?:<table\b[^>]*>.*?Meeting\s*Manager:.*?</table>)|"
             r"(?:<p\b[^>]*>.*?Meeting\s*Manager:.*?</p>)|"
