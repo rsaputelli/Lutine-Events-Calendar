@@ -586,6 +586,15 @@ with tab_create:
         if accreditation_required: lines.append("<p><b>Accreditation Required:</b> Yes</p>")
         body_html = "\n".join(lines) or "<p></p>"
 
+        # ⚡️ NEW: inject styled Meeting Manager + placeholder ID
+        note_snippet = (
+            f"<p style='color:red;font-size:11px'>"
+            f"<b>Meeting Manager: {manager_name}</b><br><br>"
+            f"<b>[App Outlook Event ID will sync here]</b>"
+            f"</p>"
+        )
+        combined_body = body_html + note_snippet
+
         # Graph payload + reminder minutes
         tz_windows = TZ_MAP[tz_choice]
         set_teams = (event_type == "Virtual" and virtual_provider == "teams")
@@ -599,7 +608,7 @@ with tab_create:
 
         payload = build_graph_event_payload(
             subject=subject,
-            body_html=body_html,
+            body_html=combined_body,   # IMPORTANT: use combined_body here
             tz_windows=tz_windows,
             start_dt=start_dt_local if not is_all_day else start_date,
             end_dt=end_dt_local if not is_all_day else end_date,
@@ -609,52 +618,34 @@ with tab_create:
             reminder_minutes=rem_minutes_for_graph
         )
 
-        # Create in Outlook
+        # ---- Create in Outlook (styled body) + PATCH placeholder -> real ID ----
         outlook_event_id = None
-        token = None
+        patched_body_for_db = combined_body  # default; replaced if PATCH succeeds
         try:
-            if missing:
-                raise RuntimeError("Missing secrets; cannot call Microsoft Graph.")
+            # If you keep a "missing secrets" sentinel, check it here; otherwise remove this line.
+            # if missing:
+            #     raise RuntimeError("Missing secrets; cannot call Microsoft Graph.")
+
             token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
             created = graph_create_event(token, GRAPH["shared_mailbox_upn"], payload)
-            outlook_event_id = created.get("id")
-        except Exception as e:
-            st.error(f"Outlook create failed: {e}")
+            outlook_event_id = (created or {}).get("id")
 
-        # Append the Outlook ID into the event body (notes)
-        try:
-            if outlook_event_id and token:
-                note_snippet = (
-                    f"<p style='color:red;font-size:11px'>"
-                    f"Meeting Manager: {manager_name}<br>"
-                    f"[App Outlook Event ID: {outlook_event_id}]"
-                    f"</p>"
-                    
-                )
-                patch_url = (
-                    f"https://graph.microsoft.com/v1.0/users/"
-                    f"{GRAPH['shared_mailbox_upn']}/events/{outlook_event_id}"
-                )
+            if outlook_event_id:
+                patch_url = f"https://graph.microsoft.com/v1.0/users/{GRAPH['shared_mailbox_upn']}/events/{outlook_event_id}"
                 headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-                # Read current body so we can append without overwriting
-                get_resp = requests.get(patch_url, headers=headers, timeout=15)
-                get_resp.raise_for_status()
-                body_obj = get_resp.json().get("body", {}) or {}
-                cur_html = body_obj.get("content") or ""
+                # swap the placeholder with the real ID, preserving the 11px red style
+                patched_body_for_db = combined_body.replace(
+                    "[App Outlook Event ID will sync here]",
+                    f"[App Outlook Event ID: {outlook_event_id}]"
+                )
 
-                # If the existing body was plain text, wrap it so we don't lose content
-                if body_obj.get("contentType") == "text" and cur_html:
-                    cur_html = f"<pre>{cur_html}</pre>"
-
-                new_html = cur_html + note_snippet
-                patch_payload = {"body": {"contentType": "HTML", "content": new_html}}
+                patch_payload = {"body": {"contentType": "HTML", "content": patched_body_for_db}}
                 patch_resp = requests.patch(patch_url, headers=headers, json=patch_payload, timeout=15)
                 patch_resp.raise_for_status()
-        except Exception as e:
-            # Non-fatal; event exists even if we couldn't append the ID
-            st.warning(f"Could not append Outlook ID to notes: {e}")
 
+        except Exception as e:
+            st.warning(f"Outlook create/patch issue: {e}")
 
         # Persist in Supabase
         inserted_event_id = None
@@ -674,10 +665,13 @@ with tab_create:
                 "meeting_manager_name": manager_name,
                 "meeting_manager_email": manager_email,
                 "reminder_minutes": int(rem_minutes_for_graph),
-                "outlook_event_id": outlook_event_id,
+                "outlook_event_id": outlook_event_id,  # may be None if create failed
                 "accreditation_required": bool(accreditation_required),
                 "created_at": datetime.utcnow().isoformat(),
+                # Optional, but handy for audit:
+                "outlook_body_html": patched_body_for_db,
             }
+
             res_insert = supabase.table("events").insert(row).execute()
             if res_insert.data and len(res_insert.data) > 0:
                 inserted_event_id = res_insert.data[0].get("id")
