@@ -1112,11 +1112,6 @@ else:
                 if manager:
                     tail_parts.append(f"– Meeting Manager: {manager}")
                 tail_parts.append(f"Accreditation: {acc}")
-                
-                # ✅ NEW: append Outlook Event ID at the end if present
-                oeid = ev.get("outlook_event_id")
-                if oeid:
-                    tail_parts.append(f"[ID: {oeid}]")
 
                 doc.add_paragraph(
                     line_prefix
@@ -1144,82 +1139,119 @@ else:
             )
 
 # -----------------------------
-# Admin Tools (stub)
+# Admin Tools (Sidebar)
 # -----------------------------
-with st.expander("Admin Tools", expanded=False):
-    st.caption("Administrative utilities for calendar sync and cleanup.")
+with st.sidebar:
+    st.header("Admin")
 
-    if st.button("🔄 Bulk Sync Now (Outlook → App)"):
-        try:
-            token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
-            dlink = get_delta_link()  # None if first time
-            # If first-time, choose a window (e.g., last 180 days through +365 days)
-            if not dlink:
-                from datetime import datetime, timedelta, timezone
-                start_iso = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
-                end_iso   = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+    with st.expander("Admin Tools", expanded=False):
+        st.caption("Calendar sync and maintenance")
+
+        # --- Bulk Sync (delta) ---
+        if st.button("🔄 Bulk Sync Now (Outlook → App)", key="sb_bulk_sync"):
+            try:
+                if not GRAPH or not all(GRAPH.get(k) for k in ("tenant_id","client_id","client_secret","shared_mailbox_upn")):
+                    raise RuntimeError("Missing Graph secrets.")
+                if supabase is None:
+                    raise RuntimeError("Supabase not configured.")
+
+                token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+                dlink = get_delta_link()  # None first time
+
+                # First-time window: last 180d to next 365d
+                if not dlink:
+                    from datetime import datetime, timedelta, timezone
+                    start_iso = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
+                    end_iso   = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+                else:
+                    start_iso = end_iso = None
+
+                total_updates = 0
+                last_delta = None
+                for page in graph_delta_events(token, GRAPH["shared_mailbox_upn"], start_iso, end_iso, delta_link=dlink):
+                    values = page.get("value", [])
+                    for g in values:
+                        # Skip deletions in delta
+                        if "@removed" in g:
+                            # Optional: also delete locally by outlook_event_id here if desired
+                            continue
+                        oeid = g.get("id")
+                        if not oeid:
+                            continue
+                        res = supabase.table("events").select("id").eq("outlook_event_id", oeid).limit(1).execute()
+                        rows = res.data or []
+                        if not rows:
+                            # Not created by app -> ignore (or insert if you want to ingest external events)
+                            continue
+                        row_id = rows[0]["id"]
+                        updates = map_graph_event_to_row_updates(g)
+                        if updates:
+                            updates["updated_at"] = datetime.utcnow().isoformat()
+                            supabase.table("events").update(updates).eq("id", row_id).execute()
+                            total_updates += 1
+                    last_delta = page.get("@odata.deltaLink") or last_delta
+
+                if last_delta:
+                    save_delta_link(last_delta)
+                st.success(f"Bulk sync complete. Updated {total_updates} event(s).")
+            except Exception as e:
+                st.error(f"Bulk sync failed: {e}")
+
+        st.divider()
+
+        # --- Per-event Refresh ---
+        selected_event_id = st.text_input("Outlook Event ID", value="", key="sb_refresh_id")
+        if st.button("🔃 Refresh Selected Event", key="sb_refresh_btn"):
+            ev_id = (selected_event_id or "").strip()
+            if not ev_id:
+                st.warning("Enter an Outlook Event ID first.")
             else:
-                start_iso = end_iso = None
+                try:
+                    if not GRAPH or not all(GRAPH.get(k) for k in ("tenant_id","client_id","client_secret","shared_mailbox_upn")):
+                        raise RuntimeError("Missing Graph secrets.")
+                    if supabase is None:
+                        raise RuntimeError("Supabase not configured.")
 
-            total_updates = 0
-            last_delta = None
-            for page in graph_delta_events(token, GRAPH["shared_mailbox_upn"], start_iso, end_iso, delta_link=dlink):
-                values = page.get("value", [])
-                for g in values:
-                    # Skip deletes (delta may return @removed)
-                    if "@removed" in g:
-                        # if you want, you can also delete local rows here by outlook_event_id
-                        continue
-                    oeid = g.get("id")
-                    if not oeid:
-                        continue
-                    # find local row
-                    res = supabase.table("events").select("id").eq("outlook_event_id", oeid).limit(1).execute()
+                    token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+                    g = graph_get_event(token, GRAPH["shared_mailbox_upn"], ev_id)
+
+                    res = supabase.table("events").select("id").eq("outlook_event_id", ev_id).limit(1).execute()
                     rows = res.data or []
                     if not rows:
-                        # not created by app? you may ignore or insert – here we ignore
-                        continue
-                    row_id = rows[0]["id"]
-                    updates = map_graph_event_to_row_updates(g)
-                    if updates:
-                        updates["updated_at"] = datetime.utcnow().isoformat()
-                        supabase.table("events").update(updates).eq("id", row_id).execute()
-                        total_updates += 1
+                        st.warning("No local event matches this Outlook ID.")
+                    else:
+                        row_id = rows[0]["id"]
+                        updates = map_graph_event_to_row_updates(g)
+                        if not updates:
+                            st.info("No Outlook-owned fields to update.")
+                        else:
+                            updates["updated_at"] = datetime.utcnow().isoformat()
+                            supabase.table("events").update(updates).eq("id", row_id).execute()
+                            st.success(f"Refreshed from Outlook → updated: {', '.join(updates.keys())}")
+                except Exception as e:
+                    st.error(f"Refresh failed: {e}")
 
-                # handle paging tokens
-                last_delta = page.get("@odata.deltaLink") or last_delta
+        st.divider()
 
-            if last_delta:
-                save_delta_link(last_delta)
-            st.success(f"Bulk sync complete. Updated {total_updates} event(s).")
-        except Exception as e:
-            st.error(f"Bulk sync failed: {e}")
-    
-    selected_event_id = st.text_input("Event ID for Refresh (Outlook ID)", value="")
-    if st.button("🔃 Refresh Selected Event from Outlook"):
-        ev_id = selected_event_id.strip()
-        if not ev_id:
-            st.warning("Enter an Outlook event ID first.")
-        else:
+        # (Optional) Quick list of recent events for copy/paste of IDs
+        if st.checkbox("Show recent events (IDs)", key="sb_show_ids"):
             try:
-                token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
-                g = graph_get_event(token, GRAPH["shared_mailbox_upn"], ev_id)
-                # Find corresponding DB row
-                res = supabase.table("events").select("id, outlook_event_id").eq("outlook_event_id", ev_id).limit(1).execute()
+                res = (
+                    supabase.table("events")
+                    .select("subject,start_dt_utc,outlook_event_id")
+                    .order("start_dt_utc", desc=True)
+                    .limit(20)
+                    .execute()
+                )
                 rows = res.data or []
                 if not rows:
-                    st.warning("No local event matches this Outlook ID.")
+                    st.caption("No events found.")
                 else:
-                    row_id = rows[0]["id"]
-                    updates = map_graph_event_to_row_updates(g)
-                    if not updates:
-                        st.info("No Outlook-owned fields to update.")
-                    else:
-                        updates["updated_at"] = datetime.utcnow().isoformat()
-                        supabase.table("events").update(updates).eq("id", row_id).execute()
-                        st.success(f"Refreshed from Outlook → updated fields: {', '.join(updates.keys())}")
+                    for r in rows:
+                        st.write(f"• {r['subject']} — {r['start_dt_utc'][:16]}  |  ID: {r.get('outlook_event_id') or '—'}")
             except Exception as e:
-                st.error(f"Refresh failed: {e}")
+                st.warning(f"Could not load events: {e}")
+
 
 
 # -----------------------------
