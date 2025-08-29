@@ -432,24 +432,67 @@ tab_create, tab_edit = st.tabs(["Create", "Edit"])
 with tab_create:
     st.subheader("Create Event & Post to Master Calendar")
 
-    # Move outside the form so conditional fields update immediately
+    # -- Persist all-day flag outside the form so conditional fields update immediately
     if "is_all_day" not in st.session_state:
         st.session_state["is_all_day"] = False
+
     event_type = st.selectbox("Event Type", ["In-person", "Virtual"], index=0, key="create_event_type")
     is_all_day = st.checkbox("All-Day Event", value=st.session_state["is_all_day"], key="create_is_all_day")
     st.session_state["is_all_day"] = is_all_day
+
     prev_type = st.session_state.get("prev_event_type_create")
     if prev_type != event_type:
         st.session_state["confirm_no_link"] = False
     st.session_state["prev_event_type_create"] = event_type
 
+    # --- Reminder controls OUTSIDE the form so they re-render live ---
+    rem_col1, rem_col2 = st.columns([1, 2])
+    if "rem_mode" not in st.session_state:
+        st.session_state["rem_mode"] = "Minutes before start (Outlook)"
+
+    st.session_state["rem_mode"] = rem_col1.selectbox(
+        "Reminder Type",
+        ["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"],
+        index=["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"]
+              .index(st.session_state["rem_mode"]),
+        key="create_rem_mode_live",
+    )
+
+    # Live companion input for reminder
+    reminder_minutes = st.session_state.get("reminder_minutes", 30)
+    reminder_days = st.session_state.get("reminder_days", 1)
+    reminder_datetime_local = st.session_state.get("reminder_datetime_local")
+
+    if st.session_state["rem_mode"].startswith("Minutes"):
+        reminder_minutes = rem_col2.number_input(
+            "Minutes before start", min_value=0, max_value=10080, value=int(reminder_minutes), key="create_rem_mins_live"
+        )
+        st.session_state["reminder_minutes"] = reminder_minutes
+
+    elif st.session_state["rem_mode"].startswith("Days"):
+        reminder_days = rem_col2.number_input(
+            "Days before start", min_value=0, max_value=365, value=int(reminder_days), key="create_rem_days_live"
+        )
+        st.session_state["reminder_days"] = reminder_days
+
+    else:
+        default_dt = datetime.combine(date.today(), time(9, 0))
+        reminder_datetime_local = rem_col2.datetime_input(
+            "Reminder date & time", value=reminder_datetime_local or default_dt, key="create_rem_dt_live"
+        )
+        st.session_state["reminder_datetime_local"] = reminder_datetime_local
+
+    # -----------------
+    # Create Event Form
+    # -----------------
     with st.form("event_form_create"):
         col1, col2, col3 = st.columns(3)
         subject = col1.text_input("Event Title *", "", key="create_subject")
 
         # Client dropdown with Other
         client_options = load_clients()
-        client_sel = col2.selectbox("Client", client_options + ["Other…"], index=(0 if client_options else 0), key="create_client_sel")
+        client_sel = col2.selectbox("Client", client_options + ["Other…"],
+                                    index=(0 if client_options else 0), key="create_client_sel")
         client_other = ""
         if client_sel == "Other…":
             client_other = col2.text_input("Enter new client name", "", key="create_client_other")
@@ -462,12 +505,12 @@ with tab_create:
         start_date = col4.date_input("Start Date", value=date.today(), key="create_start_date")
         end_date   = col5.date_input("End Date",   value=date.today(), key="create_end_date")
 
-        # Times (only if not all-day)
+        # Times (only if not all-day) — allow typing with time_input
         if not is_all_day:
-            st.markdown("**Start Time**")
-            start_time = ampm_time_picker("Start", default=time(9, 0), key_prefix="create_start")
-            st.markdown("**End Time**")
-            end_time = ampm_time_picker("End", default=time(10, 0), key_prefix="create_end")
+            start_time = st.time_input("Start Time", value=time(9, 0), key="create_start_time",
+                                       step=timedelta(minutes=5))
+            end_time   = st.time_input("End Time",   value=time(10, 0), key="create_end_time",
+                                       step=timedelta(minutes=5))
         else:
             start_time = time(0, 0)
             end_time   = time(0, 0)
@@ -479,20 +522,23 @@ with tab_create:
         if event_type == "In-person":
             location = st.text_input("Location (City, Venue, etc.) *", "", key="create_location")
         else:
-            virtual_provider_label = st.selectbox("Virtual Platform", ["Teams", "Zoom", "Other"], index=0, key="create_vp_label")
+            virtual_provider_label = st.selectbox("Virtual Platform", ["Teams", "Zoom", "Other"],
+                                                  index=0, key="create_vp_label")
             PROVIDER_MAP = {"Teams": "teams", "Zoom": "zoom", "Other": "other"}
             virtual_provider = PROVIDER_MAP.get(virtual_provider_label, "other")
             virtual_link = st.text_input("Virtual Meeting Link (optional)", "", key="create_vlink")
 
         st.markdown("---")
-        accreditation_required = st.selectbox("CME/Accreditation Required?", ["No", "Yes"], index=0, key="create_acc") == "Yes"
+        accreditation_required = st.selectbox("CME/Accreditation Required?", ["No", "Yes"],
+                                              index=0, key="create_acc") == "Yes"
         st.markdown("---")
 
         # Meeting Manager dropdown with Other
         st.markdown("**Meeting Manager (internal only):**")
         managers = load_managers()  # list of (name,email)
         manager_labels = [f"{n} <{e}>" if e else n for n, e in managers]
-        manager_sel = st.selectbox("Choose manager", manager_labels + ["Other…"], index=(0 if managers else 0), key="create_mm_sel")
+        manager_sel = st.selectbox("Choose manager", manager_labels + ["Other…"],
+                                   index=(0 if managers else 0), key="create_mm_sel")
         manager_name = ""
         manager_email = ""
         if manager_sel == "Other…":
@@ -504,33 +550,18 @@ with tab_create:
             if idx >= 0:
                 manager_name, manager_email = managers[idx]
 
-        # Reminder modes
-        rem_col1, rem_col2 = st.columns([1, 2])
-        rem_mode = rem_col1.selectbox(
-            "Reminder Type",
-            ["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"],
-            index=0, key="create_rem_mode"
-        )
-        reminder_minutes = 30
-        reminder_days = 1
-        reminder_datetime_local = None
-        if rem_mode.startswith("Minutes"):
-            reminder_minutes = rem_col2.number_input("Minutes before start", min_value=0, max_value=10080, value=30, key="create_rem_mins")
-        elif rem_mode.startswith("Days"):
-            reminder_days = rem_col2.number_input("Days before start", min_value=0, max_value=365, value=1, key="create_rem_days")
-        else:
-            reminder_datetime_local = rem_col2.datetime_input("Reminder date & time", value=datetime.combine(date.today(), time(9,0)), key="create_rem_dt")
-
         # Optional Notes (included in Outlook body)
         notes = st.text_area("Notes (included in Outlook event body)", key="create_notes")
 
         # Confirmation for blank virtual link
         if event_type == "Virtual" and (not virtual_link):
             if not st.session_state.get("confirm_no_link"):
-                st.warning("Virtual link is blank. Click again to confirm creating without a link. We'll remind you every 7 days until a link is added.")
+                st.warning("Virtual link is blank. Click again to confirm creating without a link. "
+                           "We'll remind you every 7 days until a link is added.")
+
         submitted = st.form_submit_button("Create Event")
 
-    # ----- Create submission handling (UNCHANGED except for reminder modes) -----
+    # ----- Create submission handling -----
     if submitted:
         if event_type == "Virtual" and (not virtual_link) and not st.session_state.get("confirm_no_link"):
             st.session_state["confirm_no_link"] = True
@@ -565,15 +596,20 @@ with tab_create:
 
         # Persist “Other…” choices
         if supabase and client_value and client_sel == "Other…":
-            try: supabase.table("clients").insert({"name": client_value}).execute()
-            except Exception: pass
+            try:
+                supabase.table("clients").insert({"name": client_value}).execute()
+            except Exception:
+                pass
         if supabase and manager_sel == "Other…" and manager_name and manager_email:
-            try: supabase.table("meeting_managers").insert({"name": manager_name, "email": manager_email}).execute()
-            except Exception: pass
+            try:
+                supabase.table("meeting_managers").insert({"name": manager_name, "email": manager_email}).execute()
+            except Exception:
+                pass
 
-        # Outlook body
+        # Outlook body (base)
         lines = []
-        if client_value: lines.append(f"<p><b>Client:</b> {client_value}</p>")
+        if client_value:
+            lines.append(f"<p><b>Client:</b> {client_value}</p>")
         if event_type == "Virtual":
             vp_label = {"teams": "Teams", "zoom": "Zoom", "other": "Virtual"}.get(virtual_provider, "Virtual")
             if virtual_link:
@@ -582,33 +618,41 @@ with tab_create:
                 lines.append(f"<p><b>Virtual:</b> {vp_label} – (link to be provided)</p>")
         if event_type == "In-person" and location:
             lines.append(f"<p><b>Location:</b> {location}</p>")
-        if notes: lines.append(f"<p>{notes}</p>")
-        if accreditation_required: lines.append("<p><b>Accreditation Required:</b> Yes</p>")
+        if notes:
+            lines.append(f"<p>{notes}</p>")
+        if accreditation_required:
+            lines.append("<p><b>Accreditation Required:</b> Yes</p>")
         body_html = "\n".join(lines) or "<p></p>"
 
-        # ⚡️ NEW: inject styled Meeting Manager + placeholder ID
+        # Robust HTML for Outlook (pt units + span inside wrapper)
         note_snippet = (
-            f"<p style='color:red;font-size:11px'>"
-            f"<b>Meeting Manager: {manager_name}</b><br><br>"
-            f"<b>[App Outlook Event ID will sync here]</b>"
-            f"</p>"
+            f"<div style='mso-line-height-rule:exactly;'>"
+            f"  <span style='font-family:Segoe UI, Arial, sans-serif; font-size:11pt; color:#c00000;'>"
+            f"    <b>Meeting Manager: {manager_name}</b><br><br>"
+            f"    <b>[App Outlook Event ID will sync here]</b>"
+            f"  </span>"
+            f"</div>"
         )
         combined_body = body_html + note_snippet
 
-        # Graph payload + reminder minutes
+        # Graph payload + reminder minutes (read from session)
         tz_windows = TZ_MAP[tz_choice]
         set_teams = (event_type == "Virtual" and virtual_provider == "teams")
         location_str = location if event_type == "In-person" else (virtual_link if virtual_provider == "zoom" else None)
-        rem_minutes_for_graph = 0
+
+        rem_mode = st.session_state["rem_mode"]
         if rem_mode.startswith("Minutes"):
-            rem_minutes_for_graph = int(reminder_minutes)
+            rem_minutes_for_graph = int(st.session_state.get("reminder_minutes", 30))
         elif rem_mode.startswith("Days"):
-            rem_minutes_for_graph = int(reminder_days) * 1440
+            rem_minutes_for_graph = int(st.session_state.get("reminder_days", 1)) * 1440
+        else:
+            rem_minutes_for_graph = 0  # date-certain handled via notifications below
+
         rem_minutes_for_graph = max(0, min(rem_minutes_for_graph, 525600))  # <= 365 days
 
         payload = build_graph_event_payload(
             subject=subject,
-            body_html=combined_body,   # IMPORTANT: use combined_body here
+            body_html=combined_body,   # IMPORTANT: send styled body on create
             tz_windows=tz_windows,
             start_dt=start_dt_local if not is_all_day else start_date,
             end_dt=end_dt_local if not is_all_day else end_date,
@@ -622,10 +666,6 @@ with tab_create:
         outlook_event_id = None
         patched_body_for_db = combined_body  # default; replaced if PATCH succeeds
         try:
-            # If you keep a "missing secrets" sentinel, check it here; otherwise remove this line.
-            # if missing:
-            #     raise RuntimeError("Missing secrets; cannot call Microsoft Graph.")
-
             token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
             created = graph_create_event(token, GRAPH["shared_mailbox_upn"], payload)
             outlook_event_id = (created or {}).get("id")
@@ -634,7 +674,7 @@ with tab_create:
                 patch_url = f"https://graph.microsoft.com/v1.0/users/{GRAPH['shared_mailbox_upn']}/events/{outlook_event_id}"
                 headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-                # swap the placeholder with the real ID, preserving the 11px red style
+                # swap the placeholder with the real ID, preserving the style
                 patched_body_for_db = combined_body.replace(
                     "[App Outlook Event ID will sync here]",
                     f"[App Outlook Event ID: {outlook_event_id}]"
@@ -647,10 +687,11 @@ with tab_create:
         except Exception as e:
             st.warning(f"Outlook create/patch issue: {e}")
 
-        # Persist in Supabase
+        # ---------- Persist in Supabase ----------
         inserted_event_id = None
         try:
-            if supabase is None: raise RuntimeError("Supabase not configured.")
+            if supabase is None:
+                raise RuntimeError("Supabase not configured.")
             row = {
                 "subject": subject,
                 "client": client_value or None,
@@ -665,21 +706,19 @@ with tab_create:
                 "meeting_manager_name": manager_name,
                 "meeting_manager_email": manager_email,
                 "reminder_minutes": int(rem_minutes_for_graph),
-                "outlook_event_id": outlook_event_id,  # may be None if create failed
+                "outlook_event_id": outlook_event_id,
                 "accreditation_required": bool(accreditation_required),
                 "created_at": datetime.utcnow().isoformat(),
-                # Optional, but handy for audit:
-                "outlook_body_html": patched_body_for_db,
+                "outlook_body_html": patched_body_for_db,  # final body we sent to Outlook
             }
-
             res_insert = supabase.table("events").insert(row).execute()
             if res_insert.data and len(res_insert.data) > 0:
                 inserted_event_id = res_insert.data[0].get("id")
 
-            # Date-certain reminder
-            if rem_mode.startswith("On date/time") and reminder_datetime_local:
+            # Date-certain reminder notification (email via app)
+            if rem_mode.startswith("On date/time") and st.session_state.get("reminder_datetime_local"):
                 try:
-                    notify_utc = reminder_datetime_local.replace(
+                    notify_utc = st.session_state["reminder_datetime_local"].replace(
                         tzinfo=ZoneInfo(IANA_MAP[tz_choice])
                     ).astimezone(ZoneInfo("UTC"))
                     supabase.table("notifications").insert({
@@ -713,6 +752,7 @@ with tab_create:
             st.error(f"Supabase insert failed: {e}")
         else:
             st.success("Event created and saved successfully.")
+
             # Optional manager email (uses your existing send_email)
             if manager_email:
                 ok_mgr, info_mgr = send_email(
@@ -720,7 +760,9 @@ with tab_create:
                     f"You are the Meeting Manager for '{subject}'",
                     f"<p>Hello {manager_name},</p><p>You have been added as the Meeting Manager for <b>{subject}</b>.</p>"
                 )
-                if ok_mgr: st.info("Notification email sent to Meeting Manager.")
+                if ok_mgr:
+                    st.info("Notification email sent to Meeting Manager.")
+
             # Accreditation email
             if accreditation_required:
                 start_et = start_dt_utc.astimezone(ZoneInfo("America/New_York"))
@@ -734,7 +776,9 @@ with tab_create:
                     subject="Accreditation Request",
                     html_body=("<p>An event has been created that requires accreditation.</p>" + info_html)
                 )
-                if ok_acc: st.info("Accreditation request email sent.")
+                if ok_acc:
+                    st.info("Accreditation request email sent.")
+
 
 # ========
 # EDIT TAB
