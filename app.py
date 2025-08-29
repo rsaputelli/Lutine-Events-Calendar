@@ -20,9 +20,10 @@ from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from supabase import create_client, Client
 
-import smtplib
+import smtplib, ssl
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.utils import formataddr
+
 
 # -----------------------------
 # Config & Secrets
@@ -55,6 +56,12 @@ if missing:
 supabase: Client | None = None
 if SUPA.get("url") and SUPA.get("key"):
     supabase = create_client(SUPA["url"], SUPA["key"])
+    
+with st.expander("Email diagnostics", expanded=False):
+    test_to = st.text_input("Send a test email to:", value="")
+    if st.button("Send test email"):
+        ok, info = notify_via_graph_then_smtp([test_to], "Test from Lutine Master Calendar", "<p>This is a test.</p>")
+        st.success(f"✅ {info}") if ok else st.error(f"❌ {info}")
 
 # -----------------------------
 # Helper: Time zones (US) -> Windows TZ IDs for Graph
@@ -123,35 +130,88 @@ def graph_delete_event(token: str, shared_mailbox_upn: str, outlook_event_id: st
 # Email helpers (optional)
 # -----------------------------
 
-def send_email(to_addrs, subject: str, html_body: str, cc_addrs=None):
-    """Send HTML email via SMTP settings in [smtp] secrets. Returns (ok: bool, info: str)."""
-    if not SMTP:
-        return False, "SMTP not configured"
+# --- Email via Microsoft Graph (primary) ---
+def notify_via_graph_then_smtp(to_addrs, subject: str, html_body: str, cc_addrs=None):
+    G = GRAPH or {}  # use already-loaded GRAPH secrets
+    have_graph = all(G.get(k) for k in ("tenant_id","client_id","client_secret","shared_mailbox_upn"))
+    if have_graph:
+        try:
+            token = get_graph_token(G["tenant_id"], G["client_id"], G["client_secret"])
+            graph_send_mail(token, G["shared_mailbox_upn"], to_addrs, subject, html_body, cc_addrs=cc_addrs)
+            return (True, "sent-via-graph")
+        except Exception as e:
+            graph_err = str(e)  # fall back to SMTP
+    else:
+        graph_err = "graph-secrets-missing"
 
-    # Normalize inputs to lists
-    if isinstance(to_addrs, str):
-        to_addrs = [to_addrs]
-    if cc_addrs is None:
-        cc_addrs = []
-    elif isinstance(cc_addrs, str):
-        cc_addrs = [cc_addrs]
+    ok, info = send_email_smtp(to_addrs, subject, html_body, cc_addrs=cc_addrs)
+    if ok:
+        return (True, "sent-via-smtp")
+    else:
+        return (False, f"graph:{graph_err}; smtp:{info}")
+
+
+# --- Email via SMTP (fallback) ---
+import smtplib, ssl
+from email.utils import formataddr
+from email.mime.text import MIMEText
+
+def send_email_smtp(to_addrs, subject: str, html_body: str, cc_addrs=None, bcc_addrs=None):
+    cfg = SMTP or {}  # <- use global SMTP from st.secrets
+    host = cfg.get("host"); port = int(cfg.get("port", 587))
+    user = cfg.get("user"); pwd = cfg.get("password")
+    from_addr = cfg.get("from_addr") or user
+    from_name = cfg.get("from_name", "Lutine Calendar Bot")
+                                                 
+
+    if not (host and port and user and pwd and from_addr):
+        return (False, "SMTP not configured")
+
+    if isinstance(to_addrs, str): to_addrs = [to_addrs]
+    if isinstance(cc_addrs, str): cc_addrs = [cc_addrs]
+    if isinstance(bcc_addrs, str): bcc_addrs = [bcc_addrs]
+    cc_addrs = cc_addrs or []; bcc_addrs = bcc_addrs or []
+
+    msg = MIMEText(html_body or "", "html")
+    msg["Subject"] = subject
+    msg["From"] = formataddr((from_name, from_addr))
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs: msg["Cc"] = ", ".join(cc_addrs)
 
     try:
-        msg = MIMEText(html_body, "html")
-        msg["Subject"] = subject
-        from_addr = SMTP.get("from_addr", SMTP.get("user"))
-        from_name = SMTP.get("from_name", "Lutine Calendar Bot")
-        msg["From"] = formataddr((from_name, from_addr))
-        msg["To"] = ", ".join(to_addrs)
-        if cc_addrs:
-            msg["Cc"] = ", ".join(cc_addrs)
-        with smtplib.SMTP(SMTP.get("host"), int(SMTP.get("port", 587))) as server:
-            server.starttls()
-            server.login(SMTP.get("user"), SMTP.get("password"))
-            server.sendmail(from_addr, to_addrs + cc_addrs, msg.as_string())
-        return True, "sent"
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP(host, port, timeout=30) as s:
+            s.ehlo(); s.starttls(context=ctx); s.ehlo()
+            s.login(user, pwd)
+            s.sendmail(from_addr, to_addrs + cc_addrs + bcc_addrs, msg.as_string())
+        return (True, "sent")
     except Exception as e:
-        return False, str(e)
+        return (False, f"SMTP error: {e}")
+
+# --- Unified notifier: try Graph then SMTP ---
+def notify_via_graph_then_smtp(to_addrs, subject: str, html_body: str, cc_addrs=None):
+    # 1) Try Graph if Graph secrets are present
+    G = SECRETS.get("graph") or {}
+    have_graph = all(G.get(k) for k in ("tenant_id","client_id","client_secret","shared_mailbox_upn"))
+    if have_graph:
+        try:
+            token = get_graph_token(G["tenant_id"], G["client_id"], G["client_secret"])
+            graph_send_mail(token, G["shared_mailbox_upn"], to_addrs, subject, html_body, cc_addrs=cc_addrs)
+            return (True, "sent-via-graph")
+        except Exception as e:
+            # fall through to SMTP
+            graph_err = str(e)
+    else:
+        graph_err = "graph-secrets-missing"
+
+    # 2) Fallback to SMTP
+    ok, info = send_email_smtp(to_addrs, subject, html_body, cc_addrs=cc_addrs)
+    if ok:
+        return (True, "sent-via-smtp")
+    else:
+        # include Graph reason to help debugging
+        return (False, f"graph:{graph_err}; smtp:{info}")
+
 
 # -----------------------------
 # Payload builder
@@ -556,28 +616,45 @@ with tab_create:
             st.error(f"Supabase insert failed: {e}")
         else:
             st.success("Event created and saved successfully.")
-            # Optional manager email (uses your existing send_email)
+            # Optional manager email (uses your existing send_email_smtp or send_email)
             if manager_email:
-                ok_mgr, info_mgr = send_email(
+                ok_mgr, info_mgr = notify_via_graph_then_smtp(
                     [manager_email],
                     f"You are the Meeting Manager for '{subject}'",
-                    f"<p>Hello {manager_name},</p><p>You have been added as the Meeting Manager for <b>{subject}</b>.</p>"
+                    f"<p>Hello {manager_name},</p>"
+                    f"<p>You have been added as the Meeting Manager for <b>{subject}</b>.</p>"
                 )
-                if ok_mgr: st.info("Notification email sent to Meeting Manager.")
-            # Accreditation email
+                if ok_mgr:
+                    st.info("✅ Notification email sent to Meeting Manager.")
+                else:
+                    st.warning(f"❌ Manager email not sent: {info_mgr}")
+            else:
+                st.warning("⚠️ No Meeting Manager email set; skipping email.")
+
+
+            # Optional accreditation email
             if accreditation_required:
-                start_et = start_dt_utc.astimezone(ZoneInfo("America/New_York"))
-                end_et = end_dt_utc.astimezone(ZoneInfo("America/New_York"))
-                vp_label = {"teams": "Teams", "zoom": "Zoom", "other": "Virtual"}.get(virtual_provider, "Virtual")
-                info_html = fmt_event_info(subject, start_et, end_et, is_all_day, tz_choice, client_value,
-                                           event_type, location, vp_label, virtual_link, manager_name, manager_email)
-                ok_acc, info_acc = send_email(
-                    to_addrs=["mkomenko@lutinemanagement.com"],
-                    cc_addrs=["tbarrett@lutinemanagement.com"],
-                    subject="Accreditation Request",
-                    html_body=("<p>An event has been created that requires accreditation.</p>" + info_html)
+                info_html = (
+                    f"<p><b>Event:</b> {subject}<br>"
+                    f"<b>Client:</b> {client_value or ''}<br>"
+                    f"<b>Manager:</b> {manager_name or ''} ({manager_email or ''})</p>"
                 )
-                if ok_acc: st.info("Accreditation request email sent.")
+                ok_acc, info_acc = notify_via_graph_then_smtp(
+                    ["mkomenko@lutinemanagement.com"],
+                    "Accreditation Request",
+                    "<p>An event has been created that requires accreditation.</p>" + info_html,
+                    cc_addrs=["tbarrett@lutinemanagement.com"]
+                )
+                if ok_acc:
+                    st.info("✅ Accreditation request email sent.")
+                else:
+                    st.warning(f"❌ Accreditation email not sent: {info_acc}")
+
+                if ok_acc:
+                    st.info("✅ Accreditation request email sent.")
+                else:
+                    st.warning(f"❌ Accreditation email not sent: {info_acc}")
+
 
 # ========
 # EDIT TAB
