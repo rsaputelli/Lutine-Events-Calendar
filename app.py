@@ -1165,49 +1165,49 @@ with tab_edit:
                     rem_minutes_for_graph_e = 0  # date-certain handled below
                 rem_minutes_for_graph_e = max(0, min(rem_minutes_for_graph_e, 525600))
 
-            # ---- PATCH Outlook core fields (subject/time/location/reminder); DO NOT send body ----
-            if ev.get("outlook_event_id"):
-                if missing:
-                    raise RuntimeError("Missing Graph secrets for update.")
-                token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+                # ---- PATCH Outlook core fields (subject/time/location/reminder); DO NOT send body ----
+                if ev.get("outlook_event_id"):
+                    if missing:
+                        raise RuntimeError("Missing Graph secrets for update.")
+                    token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
 
-                tz_windows_e = TZ_MAP[tz_choice_e]
-                patch_payload = {
-                    "subject": subject_e,
-                    "isAllDay": bool(is_all_day_e),
-                    "start": graph_datetime_obj(start_local_new, tz_windows=tz_windows_e),
-                    "end":   graph_datetime_obj(end_local_new,   tz_windows=tz_windows_e),
-                    "isReminderOn": bool(rem_minutes_for_graph_e > 0),
-                    "reminderMinutesBeforeStart": int(rem_minutes_for_graph_e),
-                }
-                if event_type_e == "In-person":
-                    patch_payload["location"] = {"displayName": location_e or ""}
-                else:
-                    patch_payload["location"] = {"displayName": ""}
+                    tz_windows_e = TZ_MAP[tz_choice_e]
+                    patch_payload = {
+                        "subject": subject_e,
+                        "isAllDay": bool(is_all_day_e),
+                        "start": graph_datetime_obj(start_local_new, tz_windows=tz_windows_e),
+                        "end":   graph_datetime_obj(end_local_new,   tz_windows=tz_windows_e),
+                        "isReminderOn": bool(rem_minutes_for_graph_e > 0),
+                        "reminderMinutesBeforeStart": int(rem_minutes_for_graph_e),
+                    }
+                    if event_type_e == "In-person":
+                        patch_payload["location"] = {"displayName": location_e or ""}
+                    else:
+                        patch_payload["location"] = {"displayName": ""}
 
-                # Core Outlook update
-                update_outlook_event(token, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"], patch_payload)
+                    # Core Outlook update
+                    update_outlook_event(token, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"], patch_payload)
 
-                # Update ONLY the red Meeting Manager block (preserve ID & formatting)
-                ok_mgr = update_outlook_manager_block(
-                    outlook_event_id=ev["outlook_event_id"],
-                    manager_name=manager_name_e,
-                    mailbox_upn=GRAPH["shared_mailbox_upn"],
-                    token=token,
-                )
-                if not ok_mgr:
-                    st.warning("Could not update the Meeting Manager line in the Outlook body (non-fatal).")
+                    # Update ONLY the red Meeting Manager block (preserve ID & formatting)
+                    ok_mgr = update_outlook_manager_block(
+                        outlook_event_id=ev["outlook_event_id"],
+                        manager_name=manager_name_e,
+                        mailbox_upn=GRAPH["shared_mailbox_upn"],
+                        token=token,
+                    )
+                    if not ok_mgr:
+                        st.warning("Could not update the Meeting Manager line in the Outlook body (non-fatal).")
 
-                # 🔥 New: Update Client + Accreditation lines (insert/replace before manager block)
-                ok_meta = upsert_outlook_client_and_accreditation(
-                    token=token,
-                    mailbox_upn=GRAPH["shared_mailbox_upn"],
-                    event_id=ev["outlook_event_id"],
-                    client_value=client_value,                  # from edit form
-                    accreditation_required=accreditation_required_e,
-                )
-                if not ok_meta:
-                    st.warning("Could not update Client/Accreditation lines in the Outlook body (non-fatal).")
+                    # 🔥 New: Update Client + Accreditation lines (insert/replace before manager block)
+                    ok_meta = upsert_outlook_client_and_accreditation(
+                        token=token,
+                        mailbox_upn=GRAPH["shared_mailbox_upn"],
+                        event_id=ev["outlook_event_id"],
+                        client_value=client_value,                  # from edit form
+                        accreditation_required=accreditation_required_e,
+                    )
+                    if not ok_meta:
+                        st.warning("Could not update Client/Accreditation lines in the Outlook body (non-fatal).")
 
 
                 # ---- UPDATE Supabase ----
