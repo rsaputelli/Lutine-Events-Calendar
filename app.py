@@ -625,10 +625,11 @@ with tab_create:
         try:
             if outlook_event_id and token:
                 note_snippet = (
-                    f"<p style='color:#666;font-size:10px'>"
+                    f"<p style='color:red;font-size:11px'>"
+                    f"Meeting Manager: {manager_name}<br>"
                     f"[App Outlook Event ID: {outlook_event_id}]"
                     f"</p>"
-                )
+)                )
                 patch_url = (
                     f"https://graph.microsoft.com/v1.0/users/"
                     f"{GRAPH['shared_mailbox_upn']}/events/{outlook_event_id}"
