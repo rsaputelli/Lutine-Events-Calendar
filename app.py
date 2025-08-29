@@ -629,6 +629,7 @@ with tab_create:
                     f"Meeting Manager: {manager_name}<br>"
                     f"[App Outlook Event ID: {outlook_event_id}]"
                     f"</p>"
+                    
 )                )
                 patch_url = (
                     f"https://graph.microsoft.com/v1.0/users/"
