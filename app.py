@@ -124,52 +124,57 @@ def graph_delete_event(token: str, shared_mailbox_upn: str, outlook_event_id: st
         
 import re, html, requests
 
+import re, html, requests
+
 def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, mailbox_upn: str, token: str) -> bool:
     """
-    Ensures there is exactly ONE 'Meeting Manager + [App Outlook Event ID: …]' block,
-    in robust Outlook-friendly formatting (1-cell table, 11pt). Replaces any legacy
-    <p> or <div><span> variants and preserves the existing ID if present.
+    Ensure exactly ONE 'Meeting Manager + [App Outlook Event ID: …]' block exists.
+    Removes any legacy variants (p/div/span/table) and inserts a single 11pt table block.
     """
     try:
-        # 1) Fetch current body
         get_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_upn}/events/{outlook_event_id}"
         headers = {"Authorization": f"Bearer {token}"}
+
+        # 1) Fetch body
         r = requests.get(get_url, headers=headers, timeout=15)
         r.raise_for_status()
-        body_obj = (r.json() or {}).get("body", {}) or {}
-        content_type = (body_obj.get("contentType") or "html").lower()
-        cur_html = body_obj.get("content") or ""
-        if content_type == "text" and cur_html:
+        body = (r.json() or {}).get("body", {}) or {}
+        ctype = (body.get("contentType") or "html").lower()
+        cur_html = body.get("content") or ""
+        if ctype == "text" and cur_html:
             from html import escape
             cur_html = f"<pre>{escape(cur_html)}</pre>"
 
-        # 2) Try to preserve an existing ID anywhere in the body
-        id_re = re.compile(r"\[(?:App\s+)?Outlook\s+Event\s+ID:?\s*(?P<eid>[^\]]+)\]", re.I)
-        m_id = id_re.search(cur_html)
+        # 2) Preserve an existing ID if present anywhere
+        m_id = re.search(r"\[(?:App\s+)?Outlook\s+Event\s+ID:?\s*(?P<eid>[^\]]+)\]", cur_html, flags=re.I)
         preserved_id = (m_id.group("eid").strip() if m_id else "") or outlook_event_id
 
-        # 3) Remove any existing 'Meeting Manager' blocks (p/div/span/table variants)
-        patterns = [
-            # old <p style="color:red;font-size:11px/11pt">…</p>
-            r"<p[^>]*style=['\"][^'\"]*color\s*:\s*red[^'\"]*font-size\s*:\s*(?:11px|11pt)[^'\"]*['\"][^>]*>.*?Meeting\s+Manager:.*?\[.+?Outlook\s+Event\s+ID.*?\].*?</p>",
-            # new <div><span style="…color:…;font-size:11pt">…</span></div>
-            r"<div[^>]*>[^<]*<span[^>]*style=['\"][^'\"]*font-size\s*:\s*(?:11pt|11px)[^'\"]*color[^;'\"]*:[^;'\"]*red[^'\"]*['\"][^>]*>.*?Meeting\s+Manager:.*?\[.+?Outlook\s+Event\s+ID.*?\].*?</span>[^<]*</div>",
-            # table cell variant (defensive)
-            r"<table[^>]*>.*?<td[^>]*style=['\"][^'\"]*font-size\s*:\s*(?:11pt|11px)[^'\"]*color[^;'\"]*:[^;'\"]*red[^'\"]*['\"][^>]*>.*?Meeting\s+Manager:.*?\[.+?Outlook\s+Event\s+ID.*?\].*?</td>.*?</table>",
-        ]
-        for pat in patterns:
-            cur_html = re.sub(pat, "", cur_html, flags=re.I | re.S)
+        # 3) Remove ANY existing Manager blocks (broad patterns, style-agnostic)
+        #    a) whole tables that contain both phrases
+        pat_table = re.compile(r"<table\b.*?>.*?Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].*?</table>",
+                               re.I | re.S)
+        #    b) any single block tag that contains both phrases
+        pat_block = re.compile(r"<(?P<tag>p|div|span|td)\b[^>]*>.*?Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].*?</(?P=tag)>",
+                               re.I | re.S)
 
-        # 4) Build the single normalized block (1-cell table, 11pt)
+        # remove repeatedly until stable (handles nested wrappers Outlook may add)
+        changed = True
+        while changed:
+            new_html = pat_table.sub("", cur_html)
+            new_html = pat_block.sub("", new_html)
+            changed = (new_html != cur_html)
+            cur_html = new_html
+
+        # 4) Append ONE normalized block (1-cell table, 11pt)
         safe_mgr = html.escape(manager_name)
+        safe_id  = html.escape(preserved_id)
         block = (
             "<table role='presentation' style='border-collapse:collapse;border-spacing:0;margin:0;padding:0;'>"
             "<tr><td style='font-family:Segoe UI, Arial, sans-serif; font-size:11pt; color:#c00000;'>"
             f"<b>Meeting Manager: {safe_mgr}</b><br><br>"
-            f"<b>[App Outlook Event ID: {html.escape(preserved_id)}]</b>"
+            f"<b>[App Outlook Event ID: {safe_id}]</b>"
             "</td></tr></table>"
         )
-
         new_html = cur_html + block
 
         # 5) Patch back
@@ -184,6 +189,7 @@ def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, ma
 
     except Exception:
         return False
+
 
         
 def graph_datetime_obj(dt_local, *, tz_windows: str) -> dict:
@@ -1184,6 +1190,16 @@ with tab_edit:
 
         st.success("Event updated.")
         st.session_state.pop("edit_confirm_no_link", None)
+        # Keep the edited event visible after refresh (optional UX nicety)
+        try:
+            # show the month of the (new) start date and include next ~30 days
+            new_start_date = start_local_new.date()
+            st.session_state["edit_from"] = new_start_date.replace(day=1)
+            st.session_state["edit_to"]   = new_start_date + timedelta(days=30)
+            # widen client filter so we don't accidentally hide it
+            st.session_state["edit_client"] = "(all)"
+        except Exception:
+            pass        
         st.rerun()
 
 # -----------------------------
