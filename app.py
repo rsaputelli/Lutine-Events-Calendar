@@ -1245,7 +1245,7 @@ with tab_edit:
             st.session_state["edit_client"] = "(all)"
         except Exception:
             pass        
-  
+ """ 
 # -----------------------------
 # Export to Word (grouped by month)
 # -----------------------------
@@ -1384,7 +1384,7 @@ def build_doc(events: list[dict]) -> bytes:
                 file_name=f"Lutine_Master_Calendar_{date.today().year}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
-
+"""
 # ----- Admin panel: Export to Word (always visible) -----
 with st.sidebar.expander("Admin: Export Events to Word", expanded=False):
     # Filters for export (independent of page tabs)
