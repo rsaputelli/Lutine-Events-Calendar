@@ -122,11 +122,13 @@ def graph_delete_event(token: str, shared_mailbox_upn: str, outlook_event_id: st
     if r.status_code not in (204, 404):
         raise RuntimeError(f"Graph DELETE {r.status_code}: {r.text}")
         
+import re, html, requests
+
 def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, mailbox_upn: str, token: str) -> bool:
     """
-    Upserts the red 11px 'Meeting Manager + [App Outlook Event ID: X]' block
-    in the event's HTML body, preserving the existing ID if present.
-    Returns True on success (PATCH 2xx), False otherwise.
+    Ensures there is exactly ONE 'Meeting Manager + [App Outlook Event ID: …]' block,
+    in robust Outlook-friendly formatting (1-cell table, 11pt). Replaces any legacy
+    <p> or <div><span> variants and preserves the existing ID if present.
     """
     try:
         # 1) Fetch current body
@@ -137,52 +139,52 @@ def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, ma
         body_obj = (r.json() or {}).get("body", {}) or {}
         content_type = (body_obj.get("contentType") or "html").lower()
         cur_html = body_obj.get("content") or ""
-
-        # 2) Normalize to HTML so we never drop text bodies
         if content_type == "text" and cur_html:
-            cur_html = f"<pre>{html.escape(cur_html)}</pre>"
+            from html import escape
+            cur_html = f"<pre>{escape(cur_html)}</pre>"
 
-        # 3) Regex to locate existing red 11px manager block and capture current ID
-        block_re = re.compile(
-            r"""<p[^>]*style=['"]?[^'"]*color\s*:\s*red[^'"]*font-size\s*:\s*11px[^'"]*['"]?[^>]*>\s*
-                 <b>\s*Meeting\s+Manager:\s*(?P<name>.*?)\s*</b>\s*
-                 <br\s*/?>\s*(?:<br\s*/?>)?\s*
-                 <b>\s*\[(?:App\s+)?Outlook\s+Event\s+ID:?\s*(?P<eid>[^\]]+)\]\s*</b>\s*
-               </p>""",
-            re.IGNORECASE | re.DOTALL | re.VERBOSE
+        # 2) Try to preserve an existing ID anywhere in the body
+        id_re = re.compile(r"\[(?:App\s+)?Outlook\s+Event\s+ID:?\s*(?P<eid>[^\]]+)\]", re.I)
+        m_id = id_re.search(cur_html)
+        preserved_id = (m_id.group("eid").strip() if m_id else "") or outlook_event_id
+
+        # 3) Remove any existing 'Meeting Manager' blocks (p/div/span/table variants)
+        patterns = [
+            # old <p style="color:red;font-size:11px/11pt">…</p>
+            r"<p[^>]*style=['\"][^'\"]*color\s*:\s*red[^'\"]*font-size\s*:\s*(?:11px|11pt)[^'\"]*['\"][^>]*>.*?Meeting\s+Manager:.*?\[.+?Outlook\s+Event\s+ID.*?\].*?</p>",
+            # new <div><span style="…color:…;font-size:11pt">…</span></div>
+            r"<div[^>]*>[^<]*<span[^>]*style=['\"][^'\"]*font-size\s*:\s*(?:11pt|11px)[^'\"]*color[^;'\"]*:[^;'\"]*red[^'\"]*['\"][^>]*>.*?Meeting\s+Manager:.*?\[.+?Outlook\s+Event\s+ID.*?\].*?</span>[^<]*</div>",
+            # table cell variant (defensive)
+            r"<table[^>]*>.*?<td[^>]*style=['\"][^'\"]*font-size\s*:\s*(?:11pt|11px)[^'\"]*color[^;'\"]*:[^;'\"]*red[^'\"]*['\"][^>]*>.*?Meeting\s+Manager:.*?\[.+?Outlook\s+Event\s+ID.*?\].*?</td>.*?</table>",
+        ]
+        for pat in patterns:
+            cur_html = re.sub(pat, "", cur_html, flags=re.I | re.S)
+
+        # 4) Build the single normalized block (1-cell table, 11pt)
+        safe_mgr = html.escape(manager_name)
+        block = (
+            "<table role='presentation' style='border-collapse:collapse;border-spacing:0;margin:0;padding:0;'>"
+            "<tr><td style='font-family:Segoe UI, Arial, sans-serif; font-size:11pt; color:#c00000;'>"
+            f"<b>Meeting Manager: {safe_mgr}</b><br><br>"
+            f"<b>[App Outlook Event ID: {html.escape(preserved_id)}]</b>"
+            "</td></tr></table>"
         )
 
-        new_block = (
-            f"<p style='color:red;font-size:11px'>"
-            f"<b>Meeting Manager: {html.escape(manager_name)}</b><br><br>"
-            f"<b>[App Outlook Event ID: {{EID}}]</b>"
-            f"</p>"
+        new_html = cur_html + block
+
+        # 5) Patch back
+        p = requests.patch(
+            get_url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"body": {"contentType": "HTML", "content": new_html}},
+            timeout=20,
         )
-
-        m = block_re.search(cur_html)
-        if m:
-            # Preserve whatever ID is already in the body
-            preserved_id = (m.group("eid") or "").strip()
-            replacement = new_block.replace("{EID}", preserved_id)
-            new_html = block_re.sub(replacement, cur_html, count=1)
-        else:
-            # No block found — append a fresh one using the known event id
-            replacement = new_block.replace("{EID}", outlook_event_id)
-            new_html = cur_html + replacement
-
-        # 4) PATCH updated HTML back
-        patch_url = get_url
-        patch_headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        patch_payload = {"body": {"contentType": "HTML", "content": new_html}}
-        p = requests.patch(patch_url, headers=patch_headers, json=patch_payload, timeout=15)
         p.raise_for_status()
         return True
 
     except Exception:
         return False
+
         
 def graph_datetime_obj(dt_local, *, tz_windows: str) -> dict:
     """
@@ -1064,118 +1066,125 @@ with tab_edit:
     )
 
     if st.button("Save Changes", type="primary"):
-        # Validate
+        # ---- Validate ----
         errs = []
-
         if not subject_e:
             errs.append("Event Title is required.")
         if event_type_e == "In-person" and not location_e:
             errs.append("Location is required for in-person events.")
         if not (manager_name_e and manager_email_e):
             errs.append("Meeting Manager name and email are required.")
-        if not is_all_day_e:
-            # rebuild start/end local
-            pass
         if errs:
             st.error("\n".join(errs))
             st.stop()
 
-        # Build new local datetimes
-        tz_choice_lbl = tz_choice_e
-        iana_new = IANA_MAP[tz_choice_lbl]
-        tz_new = ZoneInfo(iana_new)
-        if is_all_day_e:
-            start_local_new = datetime.combine(start_date_e, time(0,0)).replace(tzinfo=tz_new)
-            end_base_new = max(end_date_e, start_date_e)
-            end_local_new = datetime.combine(end_base_new + timedelta(days=1), time(0,0)).replace(tzinfo=tz_new)
-        else:
-            start_local_new = datetime.combine(start_date_e, start_time_e).replace(tzinfo=tz_new)
-            end_local_new = datetime.combine(end_date_e, end_time_e).replace(tzinfo=tz_new)
-        if not is_all_day_e and end_local_new <= start_local_new:
-            st.error("End date/time must be after start date/time.")
-            st.stop()
-        start_utc_new = start_local_new.astimezone(ZoneInfo("UTC"))
-        end_utc_new   = end_local_new.astimezone(ZoneInfo("UTC"))
+        with st.spinner("Updating event…"):
+            try:
+                # ---- Build new local datetimes ----
+                tz_choice_lbl = tz_choice_e
+                iana_new = IANA_MAP[tz_choice_lbl]
+                tz_new = ZoneInfo(iana_new)
 
-        # Reminder minutes for Outlook
-        rem_mode_e = st.session_state["edit_rem_mode"]
-        if rem_mode_e.startswith("Minutes"):
-            rem_minutes_for_graph_e = int(st.session_state.get("edit_reminder_minutes", 30))
-        elif rem_mode_e.startswith("Days"):
-            rem_minutes_for_graph_e = int(st.session_state.get("edit_reminder_days", 1)) * 1440
-        else:
-            rem_minutes_for_graph_e = 0  # date-certain handled below
-        rem_minutes_for_graph_e = max(0, min(rem_minutes_for_graph_e, 525600))
-
-
-        # --- PATCH Outlook core fields (subject/time/location/reminder); do NOT send body here ---
-        try:
-            if ev.get("outlook_event_id"):
-                if missing: raise RuntimeError("Missing Graph secrets for update.")
-                token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
-
-                tz_windows_e = TZ_MAP[tz_choice_e]
-                patch_payload = {
-                    "subject": subject_e,
-                    "isAllDay": bool(is_all_day_e),
-                    "start": graph_datetime_obj(start_local_new, tz_windows=tz_windows_e),
-                    "end":   graph_datetime_obj(end_local_new,   tz_windows=tz_windows_e),
-                    "isReminderOn": bool(rem_minutes_for_graph_e > 0),
-                    "reminderMinutesBeforeStart": int(rem_minutes_for_graph_e),
-                }
-                if event_type_e == "In-person":
-                    patch_payload["location"] = {"displayName": location_e or ""}
+                if is_all_day_e:
+                    start_local_new = datetime.combine(start_date_e, time(0, 0)).replace(tzinfo=tz_new)
+                    end_base_new = max(end_date_e, start_date_e)
+                    end_local_new = datetime.combine(end_base_new + timedelta(days=1), time(0, 0)).replace(tzinfo=tz_new)
                 else:
-                    patch_payload["location"] = {"displayName": ""}
+                    start_local_new = datetime.combine(start_date_e, start_time_e).replace(tzinfo=tz_new)
+                    end_local_new = datetime.combine(end_date_e, end_time_e).replace(tzinfo=tz_new)
 
-                update_outlook_event(token, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"], patch_payload)
+                if not is_all_day_e and end_local_new <= start_local_new:
+                    st.error("End date/time must be after start date/time.")
+                    st.stop()
 
-                # Now update ONLY the red Meeting Manager block (preserve ID and styling)
-                ok_mgr = update_outlook_manager_block(
-                    outlook_event_id=ev["outlook_event_id"],
-                    manager_name=manager_name_e,
-                    mailbox_upn=GRAPH["shared_mailbox_upn"],
-                    token=token,
-                )
-                if not ok_mgr:
-                    st.warning("Could not update the Meeting Manager line in the Outlook body (non-fatal).")
+                start_utc_new = start_local_new.astimezone(ZoneInfo("UTC"))
+                end_utc_new   = end_local_new.astimezone(ZoneInfo("UTC"))
 
-        except Exception as e:
-            st.error(f"Outlook update failed: {e}")
+                # ---- Reminder minutes for Outlook ----
+                rem_mode_e = st.session_state["edit_rem_mode"]
+                if rem_mode_e.startswith("Minutes"):
+                    rem_minutes_for_graph_e = int(st.session_state.get("edit_reminder_minutes", 30))
+                elif rem_mode_e.startswith("Days"):
+                    rem_minutes_for_graph_e = int(st.session_state.get("edit_reminder_days", 1)) * 1440
+                else:
+                    rem_minutes_for_graph_e = 0  # date-certain handled below
+                rem_minutes_for_graph_e = max(0, min(rem_minutes_for_graph_e, 525600))
 
+                # ---- PATCH Outlook core fields (subject/time/location/reminder); DO NOT send body ----
+                if ev.get("outlook_event_id"):
+                    if missing:
+                        raise RuntimeError("Missing Graph secrets for update.")
+                    token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
 
-        # UPDATE Supabase
-        try:
-            supabase.table("events").update({
-                "subject": subject_e,
-                "client": (ev.get("client") or None),  # keep stored client, or extend UI to change if desired
-                "start_dt_utc": start_utc_new.isoformat(),
-                "end_dt_utc": end_utc_new.isoformat(),
-                "timezone_display": iana_new,
-                "is_all_day": is_all_day_e,
-                "location": location_e or None,
-                "event_type": ("virtual" if event_type_e == "Virtual" else "in_person"),
-                "virtual_provider": (virtual_provider_e or None),
-                "virtual_link": (virtual_link_e or None),
-                "meeting_manager_name": manager_name_e,
-                "meeting_manager_email": manager_email_e,
-                "reminder_minutes": int(rem_minutes_for_graph_e),
-                "accreditation_required": bool(accreditation_required_e),
-            }).eq("id", ev["id"]).execute()
+                    tz_windows_e = TZ_MAP[tz_choice_e]
+                    patch_payload = {
+                        "subject": subject_e,
+                        "isAllDay": bool(is_all_day_e),
+                        "start": graph_datetime_obj(start_local_new, tz_windows=tz_windows_e),
+                        "end":   graph_datetime_obj(end_local_new,   tz_windows=tz_windows_e),
+                        "isReminderOn": bool(rem_minutes_for_graph_e > 0),
+                        "reminderMinutesBeforeStart": int(rem_minutes_for_graph_e),
+                    }
+                    if event_type_e == "In-person":
+                        patch_payload["location"] = {"displayName": location_e or ""}
+                    else:
+                        patch_payload["location"] = {"displayName": ""}
 
-            # Upsert date-certain reminder if selected
-            if rem_mode_e.startswith("On date/time") and st.session_state.get("edit_reminder_datetime_local"):
-                notify_utc_e = st.session_state["edit_reminder_datetime_local"].replace(...)
+                    update_outlook_event(token, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"], patch_payload)
 
+                    # Update ONLY the red Meeting Manager block (preserve ID & formatting)
+                    ok_mgr = update_outlook_manager_block(
+                        outlook_event_id=ev["outlook_event_id"],
+                        manager_name=manager_name_e,
+                        mailbox_upn=GRAPH["shared_mailbox_upn"],
+                        token=token,
+                    )
+                    if not ok_mgr:
+                        st.warning("Could not update the Meeting Manager line in the Outlook body (non-fatal).")
 
-            # Remove missing-link reminders if we now have a link
-            if event_type_e == "Virtual" and (virtual_link_e):
-                delete_missing_link_reminders(supabase, ev["id"])
+                # ---- UPDATE Supabase ----
+                supabase.table("events").update({
+                    "subject": subject_e,
+                    "client": (ev.get("client") or None),  # keep stored client, or extend UI to change if desired
+                    "start_dt_utc": start_utc_new.isoformat(),
+                    "end_dt_utc": end_utc_new.isoformat(),
+                    "timezone_display": iana_new,
+                    "is_all_day": is_all_day_e,
+                    "location": location_e or None,
+                    "event_type": ("virtual" if event_type_e == "Virtual" else "in_person"),
+                    "virtual_provider": (virtual_provider_e or None),
+                    "virtual_link": (virtual_link_e or None),
+                    "meeting_manager_name": manager_name_e,
+                    "meeting_manager_email": manager_email_e,
+                    "reminder_minutes": int(rem_minutes_for_graph_e),
+                    "accreditation_required": bool(accreditation_required_e),
+                    "updated_at": datetime.utcnow().isoformat(),
+                }).eq("id", ev["id"]).execute()
 
-            st.success("Event updated.")
-        except Exception as e:
-            st.error(f"Supabase update failed: {e}")
+                # ---- Upsert date-certain reminder (email via app) ----
+                if rem_mode_e.startswith("On date/time") and st.session_state.get("edit_reminder_datetime_local"):
+                    notify_utc_e = st.session_state["edit_reminder_datetime_local"] \
+                        .replace(tzinfo=ZoneInfo(iana_new)).astimezone(ZoneInfo("UTC"))
+                    upsert_custom_reminder(
+                        supabase_client=supabase,
+                        event_id=ev["id"],
+                        notify_at_utc=notify_utc_e.isoformat(),
+                        to_email=manager_email_e,
+                        subject_line=f"Reminder: {subject_e}",
+                        body_html=f"Reminder for {subject_e} ({ev.get('client') or ''})"
+                    )
 
+                # ---- Remove missing-link reminders if we now have a link ----
+                if event_type_e == "Virtual" and virtual_link_e:
+                    delete_missing_link_reminders(supabase, ev["id"])
+
+            except Exception as e:
+                st.error(f"Update failed: {e}")
+                st.stop()
+
+        st.success("Event updated.")
+        st.session_state.pop("edit_confirm_no_link", None)
+        st.rerun()
 
 # -----------------------------
 # Export to Word (grouped by month)
