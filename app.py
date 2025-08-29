@@ -57,6 +57,17 @@ supabase: Client | None = None
 if SUPA.get("url") and SUPA.get("key"):
     supabase = create_client(SUPA["url"], SUPA["key"])
     
+with st.expander("SMTP config check (redacted)", expanded=False):
+    cfg = SMTP or {}
+    redacted = {
+        "host": cfg.get("host"),
+        "port": cfg.get("port"),
+        "user": cfg.get("user"),
+        "from_addr": cfg.get("from_addr"),
+        "from_name": cfg.get("from_name"),
+        "has_password": bool(cfg.get("password")),
+    }
+    st.json(redacted)
 
 # -----------------------------
 # Helper: Time zones (US) -> Windows TZ IDs for Graph
@@ -321,9 +332,16 @@ with st.expander("Email diagnostics (SMTP)", expanded=False):
         if not test_to.strip():
             st.warning("Enter a recipient email first.")
         else:
-            ok, info = send_email_smtp([test_to.strip()], "Test from Lutine Master Calendar", "<p>This is a test via SMTP.</p>")
-            st.success(f"✅ {info}") if ok else st.error(f"❌ {info}")
-
+            ok, info = send_email_smtp(
+                [test_to.strip()],
+                "Test from Lutine Master Calendar",
+                "<p>This is a test via SMTP.</p>"
+            )
+            info = str(info)  # ensure string to avoid _repr_html_ issues
+            if ok:
+                st.success("✅ " + info)
+            else:
+                st.error("❌ " + info)
 
 
 # -----------------------------
@@ -589,18 +607,12 @@ with tab_create:
             st.success("Event created and saved successfully.")
             # Optional manager email (uses your existing send_email_smtp)
             if manager_email:
-                ok_mgr, info_mgr = notify_via_graph_then_smtp(
-                    [manager_email],
-                    f"You are the Meeting Manager for '{subject}'",
-                    f"<p>Hello {manager_name},</p>"
-                    f"<p>You have been added as the Meeting Manager for <b>{subject}</b>.</p>"
-                )
+                ok_mgr, info_mgr = send_email_smtp([...], "subject", "<p>html</p>")
+                info_mgr = str(info_mgr)
                 if ok_mgr:
                     st.info("✅ Notification email sent to Meeting Manager.")
                 else:
-                    st.warning(f"❌ Manager email not sent: {info_mgr}")
-            else:
-                st.warning("⚠️ No Meeting Manager email set; skipping email.")
+                    st.warning("❌ Manager email not sent: " + info_mgr)
 
 
             # Accreditation (SMTP-only)
