@@ -125,28 +125,7 @@ def graph_delete_event(token: str, shared_mailbox_upn: str, outlook_event_id: st
 # Email helpers (optional)
 # -----------------------------
 
-# --- Email via Microsoft Graph (primary) ---
-def notify_via_graph_then_smtp(to_addrs, subject: str, html_body: str, cc_addrs=None):
-    G = GRAPH or {}  # use already-loaded GRAPH secrets
-    have_graph = all(G.get(k) for k in ("tenant_id","client_id","client_secret","shared_mailbox_upn"))
-    if have_graph:
-        try:
-            token = get_graph_token(G["tenant_id"], G["client_id"], G["client_secret"])
-            graph_send_mail(token, G["shared_mailbox_upn"], to_addrs, subject, html_body, cc_addrs=cc_addrs)
-            return (True, "sent-via-graph")
-        except Exception as e:
-            graph_err = str(e)  # fall back to SMTP
-    else:
-        graph_err = "graph-secrets-missing"
-
-    ok, info = send_email_smtp(to_addrs, subject, html_body, cc_addrs=cc_addrs)
-    if ok:
-        return (True, "sent-via-smtp")
-    else:
-        return (False, f"graph:{graph_err}; smtp:{info}")
-
-
-# --- Email via SMTP (fallback) ---
+# --- Email via SMTP Only ---
 import smtplib, ssl
 from email.utils import formataddr
 from email.mime.text import MIMEText
@@ -183,23 +162,8 @@ def send_email_smtp(to_addrs, subject: str, html_body: str, cc_addrs=None, bcc_a
     except Exception as e:
         return (False, f"SMTP error: {e}")
 
-# --- Unified notifier: try Graph then SMTP ---
-def notify_via_graph_then_smtp(to_addrs, subject: str, html_body: str, cc_addrs=None):
-    # 1) Try Graph if Graph secrets are present
-    G = GRAPH or {}  # use the already-loaded GRAPH secrets
-    have_graph = all(G.get(k) for k in ("tenant_id","client_id","client_secret","shared_mailbox_upn"))
-    if have_graph:
-        try:
-            token = get_graph_token(G["tenant_id"], G["client_id"], G["client_secret"])
-            graph_send_mail(token, G["shared_mailbox_upn"], to_addrs, subject, html_body, cc_addrs=cc_addrs)
-            return (True, "sent-via-graph")
-        except Exception as e:
-            # fall through to SMTP
-            graph_err = str(e)
-    else:
-        graph_err = "graph-secrets-missing"
+# --- Notifier SMTP ---
 
-    # 2) Fallback to SMTP
     ok, info = send_email_smtp(to_addrs, subject, html_body, cc_addrs=cc_addrs)
     if ok:
         return (True, "sent-via-smtp")
@@ -350,22 +314,16 @@ def fmt_event_info(subject: str, start_dt_et: datetime, end_dt_et: datetime,
     return "\n".join(parts)
     
     
-# ---- Email diagnostics (place this AFTER notify_via_graph_then_smtp is defined) ----
-with st.expander("Email diagnostics", expanded=False):
+# ---- Email diagnostics ----
+with st.expander("Email diagnostics (SMTP)", expanded=False):
     test_to = st.text_input("Send a test email to:", value="")
-    if st.button("Send test email"):
+    if st.button("Send test email (SMTP)"):
         if not test_to.strip():
             st.warning("Enter a recipient email first.")
         else:
-            try:
-                ok, info = notify_via_graph_then_smtp(
-                    [test_to.strip()],
-                    "Test from Lutine Master Calendar",
-                    "<p>This is a test.</p>"
-                )
-                st.success(f"✅ {info}") if ok else st.error(f"❌ {info}")
-            except Exception as e:
-                st.error(f"❌ Diagnostics failed: {e}")
+            ok, info = send_email_smtp([test_to.strip()], "Test from Lutine Master Calendar", "<p>This is a test via SMTP.</p>")
+            st.success(f"✅ {info}") if ok else st.error(f"❌ {info}")
+
 
 
 # -----------------------------
@@ -629,7 +587,7 @@ with tab_create:
             st.error(f"Supabase insert failed: {e}")
         else:
             st.success("Event created and saved successfully.")
-            # Optional manager email (uses your existing send_email_smtp or send_email)
+            # Optional manager email (uses your existing send_email_smtp)
             if manager_email:
                 ok_mgr, info_mgr = notify_via_graph_then_smtp(
                     [manager_email],
@@ -645,14 +603,14 @@ with tab_create:
                 st.warning("⚠️ No Meeting Manager email set; skipping email.")
 
 
-            # Optional accreditation email
+            # Accreditation (SMTP-only)
             if accreditation_required:
                 info_html = (
                     f"<p><b>Event:</b> {subject}<br>"
                     f"<b>Client:</b> {client_value or ''}<br>"
                     f"<b>Manager:</b> {manager_name or ''} ({manager_email or ''})</p>"
                 )
-                ok_acc, info_acc = notify_via_graph_then_smtp(
+                ok_acc, info_acc = send_email_smtp(
                     ["mkomenko@lutinemanagement.com"],
                     "Accreditation Request",
                     "<p>An event has been created that requires accreditation.</p>" + info_html,
@@ -663,10 +621,6 @@ with tab_create:
                 else:
                     st.warning(f"❌ Accreditation email not sent: {info_acc}")
 
-                if ok_acc:
-                    st.info("✅ Accreditation request email sent.")
-                else:
-                    st.warning(f"❌ Accreditation email not sent: {info_acc}")
 
 
 # ========
