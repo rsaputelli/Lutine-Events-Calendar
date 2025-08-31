@@ -66,53 +66,87 @@ supabase: Client | None = None
 if SUPA.get("url") and SUPA.get("key"):
     supabase = create_client(SUPA["url"], SUPA["key"])
     
-# ==== AUTH GATE (place right after header/title, before tabs) ====
-# Requires: `streamlit-supabase-auth` in requirements.txt
-# Secrets needed:
-#   [supabase]
-#   url = "https://xxxxx.supabase.co"
-#   anon_key = "eyJhbGciOi..."         # anon key (NOT service role)
-#   site_url = "https://<your-streamlit-app>.streamlit.app"  # same as Supabase Auth → URL config
+# ==== AUTH GATE (drop-in; no external widget) ====
+# Uses Supabase anon key for auth flows; keeps your service client for DB ops.
+from supabase import create_client as _create_client_for_auth
 
-
-# Separate client for AUTH (anon key). Your existing `supabase` client (service key) can stay as-is for Phase 2.
 _SUPA_SEC = st.secrets.get("supabase", {})
 _SUPA_URL = _SUPA_SEC.get("url")
 _SUPA_ANON = _SUPA_SEC.get("anon_key")
-_SITE_URL = _SUPA_SEC.get("site_url")  # shown when sending reset links
+_SITE_URL = _SUPA_SEC.get("site_url")  # must match Supabase Auth → URL Configuration
 
 if not (_SUPA_URL and _SUPA_ANON):
     st.error("Supabase anon key missing. Add supabase.anon_key to st.secrets for auth.")
     st.stop()
 
-supabase_auth = _create_client_for_auth(_SUPA_URL, _SUPA_ANON)
+auth_client = _create_client_for_auth(_SUPA_URL, _SUPA_ANON)
 
-# Show the login/signup/reset UI.
-# - Forgot password uses your SMTP + Site URL redirect set in Supabase Auth → Emails/URL config.
-# - When a user comes back with a recovery token, the widget will switch to 'Set new password' mode.
-user = login_form(
-    supabase_auth,
-    providers={"email": True},            # email/password only (no OAuth for now)
-    show_sign_up=True,                    # allow self-signup
-    show_reset=True,                      # enable 'Forgot password'
-    redirect_to=_SITE_URL or None,        # optional; Supabase Auth → URL config also handles redirect
-    labels={
-        "login": "Sign in",
-        "signup": "Create account",
-        "reset": "Forgot password?",
-        "email": "Work email",
-        "password": "Password",
-    },
-)
+def _sign_out():
+    try:
+        auth_client.auth.sign_out()
+    except Exception:
+        pass
+    st.session_state.pop("auth_user", None)
+    st.rerun()
+
+# If we already have a user in session, trust it (lightweight)
+user = st.session_state.get("auth_user")
 
 if not user:
-    # Not authenticated: stop rendering the rest of the app.
-    st.stop()
+    mode = st.radio("Authentication", ["Sign in", "Sign up", "Forgot password"], horizontal=True)
 
-# Optional: show who is signed in
-st.sidebar.success(f"Signed in as {user.get('email', 'user')}")
+    if mode == "Sign in":
+        with st.form("auth_signin"):
+            email = st.text_input("Work email", "")
+            pw = st.text_input("Password", "", type="password")
+            submit = st.form_submit_button("Sign in")
+        if submit:
+            try:
+                res = auth_client.auth.sign_in_with_password({"email": email, "password": pw})
+                user = res.user
+                if not user:
+                    st.error("Sign in failed.")
+                else:
+                    st.session_state["auth_user"] = {"email": user.email, "id": user.id}
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Sign in error: {e}")
+
+    elif mode == "Sign up":
+        with st.form("auth_signup"):
+            email = st.text_input("Work email", "")
+            pw = st.text_input("Password", "", type="password")
+            submit = st.form_submit_button("Create account")
+        if submit:
+            try:
+                res = auth_client.auth.sign_up({"email": email, "password": pw})
+                st.success("Check your email to confirm your account, then sign in.")
+            except Exception as e:
+                st.error(f"Sign up error: {e}")
+
+    else:  # Forgot password
+        with st.form("auth_reset"):
+            email = st.text_input("Work email", "")
+            submit = st.form_submit_button("Send reset link")
+        if submit:
+            try:
+                # Supabase will email a password-reset link that redirects to your Site URL
+                auth_client.auth.reset_password_for_email(
+                    email,
+                    options={"redirect_to": _SITE_URL} if _SITE_URL else None
+                )
+                st.success("If that email exists, a reset link has been sent.")
+            except Exception as e:
+                st.error(f"Reset error: {e}")
+
+    # Block app until authenticated
+    st.stop()
+else:
+    st.sidebar.success(f"Signed in as {user['email']}")
+    if st.sidebar.button("Sign out"):
+        _sign_out()
 # ==== /AUTH GATE ====
-    
+
 
 # -----------------------------
 # Helper: Time zones (US) -> Windows TZ IDs for Graph
