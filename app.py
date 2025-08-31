@@ -93,7 +93,7 @@ def _sign_out():
 user = st.session_state.get("auth_user")
 
 if not user:
-    mode = st.radio("Authentication", ["Sign in", "Sign up", "Forgot password"], horizontal=True)
+    mode = st.radio("Authentication", ["Sign in", "Forgot password"], horizontal=True)
 
     if mode == "Sign in":
         with st.form("auth_signin"):
