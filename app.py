@@ -113,8 +113,8 @@ user = login_form(
         "reset": "Forgot password?",
         "email": "Work email",
         "password": "Password",
-        )
-
+    },
+)
 if not user:
     st.stop()  # unauthenticated; halt the rest of the app
 
@@ -1753,6 +1753,7 @@ with st.sidebar:
     #st.markdown("- Streamlit secrets: **graph**, **supabase**")
     #st.markdown("- Optional SMTP secrets for email: **smtp** (host, port, user, password, from_addr, from_name)")
     #st.caption("Time zones: stored as UTC + IANA; Graph uses Windows TZ IDs. Events are created with showAs=Free. Accreditation email sent if selected.")
+
 
 
 
