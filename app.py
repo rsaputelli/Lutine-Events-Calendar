@@ -31,6 +31,9 @@ import re, html as _html, requests
 from urllib.parse import quote
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
+from streamlit_supabase_auth import login_form
+from supabase import create_client as _create_client_for_auth
+
 # -----------------------------
 # Config & Secrets
 # -----------------------------
@@ -62,6 +65,54 @@ if missing:
 supabase: Client | None = None
 if SUPA.get("url") and SUPA.get("key"):
     supabase = create_client(SUPA["url"], SUPA["key"])
+    
+# ==== AUTH GATE (place right after header/title, before tabs) ====
+# Requires: `streamlit-supabase-auth` in requirements.txt
+# Secrets needed:
+#   [supabase]
+#   url = "https://xxxxx.supabase.co"
+#   anon_key = "eyJhbGciOi..."         # anon key (NOT service role)
+#   site_url = "https://<your-streamlit-app>.streamlit.app"  # same as Supabase Auth → URL config
+
+
+# Separate client for AUTH (anon key). Your existing `supabase` client (service key) can stay as-is for Phase 2.
+_SUPA_SEC = st.secrets.get("supabase", {})
+_SUPA_URL = _SUPA_SEC.get("url")
+_SUPA_ANON = _SUPA_SEC.get("anon_key")
+_SITE_URL = _SUPA_SEC.get("site_url")  # shown when sending reset links
+
+if not (_SUPA_URL and _SUPA_ANON):
+    st.error("Supabase anon key missing. Add supabase.anon_key to st.secrets for auth.")
+    st.stop()
+
+supabase_auth = _create_client_for_auth(_SUPA_URL, _SUPA_ANON)
+
+# Show the login/signup/reset UI.
+# - Forgot password uses your SMTP + Site URL redirect set in Supabase Auth → Emails/URL config.
+# - When a user comes back with a recovery token, the widget will switch to 'Set new password' mode.
+user = login_form(
+    supabase_auth,
+    providers={"email": True},            # email/password only (no OAuth for now)
+    show_sign_up=True,                    # allow self-signup
+    show_reset=True,                      # enable 'Forgot password'
+    redirect_to=_SITE_URL or None,        # optional; Supabase Auth → URL config also handles redirect
+    labels={
+        "login": "Sign in",
+        "signup": "Create account",
+        "reset": "Forgot password?",
+        "email": "Work email",
+        "password": "Password",
+    },
+)
+
+if not user:
+    # Not authenticated: stop rendering the rest of the app.
+    st.stop()
+
+# Optional: show who is signed in
+st.sidebar.success(f"Signed in as {user.get('email', 'user')}")
+# ==== /AUTH GATE ====
+    
 
 # -----------------------------
 # Helper: Time zones (US) -> Windows TZ IDs for Graph
@@ -1683,5 +1734,6 @@ with st.sidebar:
     #st.markdown("- Streamlit secrets: **graph**, **supabase**")
     #st.markdown("- Optional SMTP secrets for email: **smtp** (host, port, user, password, from_addr, from_name)")
     #st.caption("Time zones: stored as UTC + IANA; Graph uses Windows TZ IDs. Events are created with showAs=Free. Accreditation email sent if selected.")
+
 
 
