@@ -100,7 +100,7 @@ if recovery_token:
                 # Verify token (temporary session), then update password
                 auth_client.auth.verify_otp({"type": "recovery", "token_hash": recovery_token})
                 auth_client.auth.update_user({"password": new1})
-                st.success("Password updated. Please sign in.")
+                st.success("Password updated. Return to previous window and sign in.")
                 st.query_params.clear()  # remove token from URL
             except Exception as e:
                 st.error(f"Reset failed: {e}")
