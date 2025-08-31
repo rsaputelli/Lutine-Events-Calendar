@@ -437,34 +437,38 @@ def build_graph_event_payload(
     }
 
     if is_all_day:
-        # Date-only for all-day; Graph end is exclusive (next day)
-        if isinstance(start_dt, datetime):
-            start_date = start_dt.date()
-        else:
-            start_date = start_dt
-        if isinstance(end_dt, datetime):
-            end_date = end_dt.date()
-        else:
-            end_date = end_dt
-        payload.update({
-            "isAllDay": True,
-            "start": {"dateTime": start_date.isoformat(), "timeZone": tz_windows},
-            "end": {"dateTime": end_date.isoformat(), "timeZone": tz_windows},
-        })
+        # Graph requires all-day events to span full 24h (midnight to midnight, exclusive)
+        start = {
+            "dateTime": datetime.combine(start_dt, time(0, 0)).isoformat(),
+            "timeZone": tz_windows,
+        }
+        # end must be *next day midnight*
+        end = {
+            "dateTime": datetime.combine(end_dt, time(0, 0)).isoformat(),
+            "timeZone": tz_windows,
+        }
+        payload["isAllDay"] = True
+        payload["start"] = start
+        payload["end"] = end
     else:
-        payload.update({
-            "start": {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz_windows},
-            "end": {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz_windows},
-        })
+        payload["isAllDay"] = False
+        payload["start"] = {
+            "dateTime": start_dt.isoformat(),
+            "timeZone": tz_windows,
+        }
+        payload["end"] = {
+            "dateTime": end_dt.isoformat(),
+            "timeZone": tz_windows,
+        }
 
     if location_str:
         payload["location"] = {"displayName": location_str}
 
     if set_teams:
-        payload["isOnlineMeeting"] = True
         payload["onlineMeetingProvider"] = "teamsForBusiness"
 
     return payload
+
 
 # -----------------------------
 # UI helpers – AM/PM selectors
