@@ -31,7 +31,6 @@ import re, html as _html, requests
 from urllib.parse import quote
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
-from streamlit_supabase_auth import login_form
 from supabase import create_client as _create_client_for_auth
 
 # -----------------------------
@@ -66,14 +65,12 @@ supabase: Client | None = None
 if SUPA.get("url") and SUPA.get("key"):
     supabase = create_client(SUPA["url"], SUPA["key"])
     
-# ==== AUTH GATE (drop-in; no external widget) ====
-from supabase import create_client as _create_client_for_auth
-from streamlit_supabase_auth import login_form
+# ==== AUTH GATE (pure Supabase; no external widget) ====
 
 _SUPA = st.secrets.get("supabase", {})
 _SUPA_URL  = _SUPA.get("url")
-_SUPA_ANON = _SUPA.get("anon_key")
-_SITE_URL  = _SUPA.get("site_url")  # must match Supabase Auth → URL Configuration → Site URL
+_SUPA_ANON = _SUPA.get("anon_key")  # MUST be the anon/public key (NOT service key)
+_SITE_URL  = _SUPA.get("site_url")  # e.g., "https://lutine-master-cal.streamlit.app"
 
 if not (_SUPA_URL and _SUPA_ANON):
     st.error("Supabase anon key missing. Add supabase.anon_key to st.secrets for auth.")
@@ -81,7 +78,15 @@ if not (_SUPA_URL and _SUPA_ANON):
 
 auth_client = _create_client_for_auth(_SUPA_URL, _SUPA_ANON)
 
-# 1) Handle password recovery via query param (?recovery_token=...)
+def _sign_out():
+    try:
+        auth_client.auth.sign_out()
+    except Exception:
+        pass
+    st.session_state.pop("auth_user", None)
+    st.rerun()
+
+# ---- Handle password recovery via query param (?recovery_token=...) ----
 recovery_token = st.query_params.get("recovery_token")
 if recovery_token:
     st.subheader("Set a new password")
@@ -92,45 +97,52 @@ if recovery_token:
             st.error("Passwords must match.")
         else:
             try:
-                # Verify token (creates a temporary session) then update the password
+                # Verify token (temporary session), then update password
                 auth_client.auth.verify_otp({"type": "recovery", "token_hash": recovery_token})
                 auth_client.auth.update_user({"password": new1})
                 st.success("Password updated. Please sign in.")
                 st.query_params.clear()  # remove token from URL
             except Exception as e:
                 st.error(f"Reset failed: {e}")
-    st.stop()  # do not render the login form until recovery is handled
+    st.stop()
 
-# 2) Show sign-in form (no sign-up)
-user = login_form(
-    auth_client,
-    providers={"email": True},
-    show_sign_up=False,   # disabled
-    show_reset=True,      # enable 'Forgot password'
-    redirect_to=_SITE_URL or None,
-    labels={
-        "login": "Sign in",
-        "reset": "Forgot password?",
-        "email": "Work email",
-        "password": "Password",
-    },
-)
-
+# ---- Sign-in (no signup UI) ----
+user = st.session_state.get("auth_user")
 if not user:
-    st.stop()  # unauthenticated; halt the rest of the app
+    with st.form("auth_signin"):
+        email = st.text_input("Work email", "")
+        pw    = st.text_input("Password", "", type="password")
+        cols = st.columns([1,1,3])
+        submit = cols[0].form_submit_button("Sign in")
+        forgot = cols[1].form_submit_button("Forgot password")
+    if submit:
+        try:
+            res = auth_client.auth.sign_in_with_password({"email": email, "password": pw})
+            if res and res.user:
+                st.session_state["auth_user"] = {"email": res.user.email, "id": res.user.id}
+                st.rerun()
+            else:
+                st.error("Sign in failed.")
+        except Exception as e:
+            st.error(f"Sign in error: {e}")
+    elif forgot:
+        try:
+            # Supabase will send a reset email that links back to your Site URL
+            auth_client.auth.reset_password_for_email(
+                email,
+                options={"redirect_to": _SITE_URL} if _SITE_URL else None
+            )
+            st.success("If that email exists, a reset link has been sent.")
+        except Exception as e:
+            st.error(f"Reset link error: {e}")
+    st.stop()
 
-# Optional: show who’s signed in + sign out
-def _sign_out():
-    try:
-        auth_client.auth.sign_out()
-    except Exception:
-        pass
-    st.experimental_rerun()
-
-st.sidebar.success(f"Signed in as {user.get('email','user')}")
+# ---- Authenticated: show who & sign out ----
+st.sidebar.success(f"Signed in as {user['email']}")
 if st.sidebar.button("Sign out"):
     _sign_out()
 # ==== /AUTH GATE ====
+
 
 
 
