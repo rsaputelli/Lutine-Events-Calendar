@@ -1020,42 +1020,43 @@ with tab_create:
                 except Exception:
                     pass
 
-                except Exception as e:
-                    st.error(f"Supabase insert failed: {e}")
-                else:
-                    st.success("Event created and saved successfully.")
+        except Exception as e:
+            st.error(f"Supabase insert failed: {e}")
+        else:
+            st.success("Event created and saved successfully.")
 
-                    # ✅ Only send emails if Outlook event was created successfully
-                    if created_ok:
-                        # Optional manager email
-                        if manager_email:
-                            ok_mgr, info_mgr = send_email(
-                                [manager_email],
-                                f"You are the Meeting Manager for '{subject}'",
-                                f"<p>Hello {manager_name},</p><p>You have been added as the Meeting Manager for <b>{subject}</b>.</p>"
-                            )
-                            if ok_mgr:
-                                st.info("Notification email sent to Meeting Manager.")
+            # ✅ Only send emails if Outlook event was created successfully
+            if created_ok:
+                # Optional manager email
+                if manager_email:
+                    ok_mgr, info_mgr = send_email(
+                        [manager_email],
+                        f"You are the Meeting Manager for '{subject}'",
+                        f"<p>Hello {manager_name},</p><p>You have been added as the Meeting Manager for <b>{subject}</b>.</p>"
+                    )
+                    if ok_mgr:
+                        st.info("Notification email sent to Meeting Manager.")
 
-                        # Accreditation email
-                        if accreditation_required:
-                            start_et = start_dt_utc.astimezone(ZoneInfo("America/New_York"))
-                            end_et = end_dt_utc.astimezone(ZoneInfo("America/New_York"))
-                            vp_label = {"teams": "Teams", "zoom": "Zoom", "other": "Virtual"}.get(virtual_provider, "Virtual")
-                            info_html = fmt_event_info(
-                                subject, start_et, end_et, is_all_day, tz_choice, client_value,
-                                event_type, location, vp_label, virtual_link, manager_name, manager_email
-                            )
-                            ok_acc, info_acc = send_email(
-                                to_addrs=["mkomenko@lutinemanagement.com"],
-                                cc_addrs=["tbarrett@lutinemanagement.com"],
-                                subject="Accreditation Request",
-                                html_body=("<p>An event has been created that requires accreditation.</p>" + info_html)
-                            )
-                            if ok_acc:
-                                st.info("Accreditation request email sent.")
-                    else:
-                        st.info("Saved to the app, but skipped emails because Outlook wasn’t created.")
+                # Accreditation email
+                if accreditation_required:
+                    start_et = start_dt_utc.astimezone(ZoneInfo("America/New_York"))
+                    end_et = end_dt_utc.astimezone(ZoneInfo("America/New_York"))
+                    vp_label = {"teams": "Teams", "zoom": "Zoom", "other": "Virtual"}.get(virtual_provider, "Virtual")
+                    info_html = fmt_event_info(
+                        subject, start_et, end_et, is_all_day, tz_choice, client_value,
+                        event_type, location, vp_label, virtual_link, manager_name, manager_email
+                    )
+                    ok_acc, info_acc = send_email(
+                        to_addrs=["mkomenko@lutinemanagement.com"],
+                        cc_addrs=["tbarrett@lutinemanagement.com"],
+                        subject="Accreditation Request",
+                        html_body=("<p>An event has been created that requires accreditation.</p>" + info_html)
+                    )
+                    if ok_acc:
+                        st.info("Accreditation request email sent.")
+            else:
+                st.info("Saved to the app, but skipped emails because Outlook wasn’t created.")
+
 
 
 
