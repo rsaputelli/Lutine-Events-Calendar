@@ -433,41 +433,48 @@ def build_graph_event_payload(
         "isReminderOn": True,
         "reminderMinutesBeforeStart": int(reminder_minutes),
         "body": {"contentType": "HTML", "content": body_html},
-        "showAs": "free",  # show as Free so multi-day all-day sits at the top
+        "showAs": "free",  # keep all-day bars at top
     }
 
     if is_all_day:
-        # Graph requires all-day events to span full 24h (midnight to midnight, exclusive)
-        start = {
-            "dateTime": datetime.combine(start_dt, time(0, 0)).isoformat(),
-            "timeZone": tz_windows,
-        }
-        # end must be *next day midnight*
-        end = {
-            "dateTime": datetime.combine(end_dt, time(0, 0)).isoformat(),
-            "timeZone": tz_windows,
-        }
-        payload["isAllDay"] = True
-        payload["start"] = start
-        payload["end"] = end
+        # Accept datetime or date; convert to date-only for Graph (end is exclusive next-day)
+        if isinstance(start_dt, datetime):
+            start_date = start_dt.date()
+        else:
+            start_date = start_dt
+        if isinstance(end_dt, datetime):
+            end_date = end_dt.date()
+        else:
+            end_date = end_dt
+
+        payload.update({
+            "isAllDay": True,
+            "start": {"dateTime": start_date.isoformat(), "timeZone": tz_windows},
+            "end":   {"dateTime": end_date.isoformat(),   "timeZone": tz_windows},
+        })
     else:
-        payload["isAllDay"] = False
-        payload["start"] = {
-            "dateTime": start_dt.isoformat(),
-            "timeZone": tz_windows,
-        }
-        payload["end"] = {
-            "dateTime": end_dt.isoformat(),
-            "timeZone": tz_windows,
-        }
+        # Timed event: keep wall times in the chosen Windows tz
+        if isinstance(start_dt, date):
+            raise ValueError("start_dt must be datetime when is_all_day is False")
+        if isinstance(end_dt, date):
+            raise ValueError("end_dt must be datetime when is_all_day is False")
+
+        payload.update({
+            "isAllDay": False,
+            "start": {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz_windows},
+            "end":   {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"),   "timeZone": tz_windows},
+        })
 
     if location_str:
         payload["location"] = {"displayName": location_str}
 
     if set_teams:
+        payload["isOnlineMeeting"] = True
         payload["onlineMeetingProvider"] = "teamsForBusiness"
 
     return payload
+
+
 
 
 # -----------------------------
@@ -925,12 +932,15 @@ with tab_create:
         # ---- Create in Outlook (styled body) + PATCH placeholder -> real ID ----
         outlook_event_id = None
         patched_body_for_db = combined_body  # default; replaced if PATCH succeeds
+        created_ok = False
+
         try:
             token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
             created = graph_create_event(token, GRAPH["shared_mailbox_upn"], payload)
             outlook_event_id = (created or {}).get("id")
+            created_ok = bool(outlook_event_id)
 
-            if outlook_event_id:
+            if created_ok:
                 patch_url = f"https://graph.microsoft.com/v1.0/users/{GRAPH['shared_mailbox_upn']}/events/{outlook_event_id}"
                 headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
@@ -945,7 +955,9 @@ with tab_create:
                 patch_resp.raise_for_status()
 
         except Exception as e:
-            st.warning(f"Outlook create/patch issue: {e}")
+            # Important: don't send any emails if create failed
+            st.error(f"Outlook create failed: {e}")
+
 
         # ---------- Persist in Supabase ----------
         inserted_event_id = None
@@ -1008,36 +1020,43 @@ with tab_create:
                 except Exception:
                     pass
 
-        except Exception as e:
+               except Exception as e:
             st.error(f"Supabase insert failed: {e}")
         else:
             st.success("Event created and saved successfully.")
 
-            # Optional manager email (uses your existing send_email)
-            if manager_email:
-                ok_mgr, info_mgr = send_email(
-                    [manager_email],
-                    f"You are the Meeting Manager for '{subject}'",
-                    f"<p>Hello {manager_name},</p><p>You have been added as the Meeting Manager for <b>{subject}</b>.</p>"
-                )
-                if ok_mgr:
-                    st.info("Notification email sent to Meeting Manager.")
+            # ✅ Only send emails if Outlook event was created successfully
+            if created_ok:
+                # Optional manager email
+                if manager_email:
+                    ok_mgr, info_mgr = send_email(
+                        [manager_email],
+                        f"You are the Meeting Manager for '{subject}'",
+                        f"<p>Hello {manager_name},</p><p>You have been added as the Meeting Manager for <b>{subject}</b>.</p>"
+                    )
+                    if ok_mgr:
+                        st.info("Notification email sent to Meeting Manager.")
 
-            # Accreditation email
-            if accreditation_required:
-                start_et = start_dt_utc.astimezone(ZoneInfo("America/New_York"))
-                end_et = end_dt_utc.astimezone(ZoneInfo("America/New_York"))
-                vp_label = {"teams": "Teams", "zoom": "Zoom", "other": "Virtual"}.get(virtual_provider, "Virtual")
-                info_html = fmt_event_info(subject, start_et, end_et, is_all_day, tz_choice, client_value,
-                                           event_type, location, vp_label, virtual_link, manager_name, manager_email)
-                ok_acc, info_acc = send_email(
-                    to_addrs=["mkomenko@lutinemanagement.com"],
-                    cc_addrs=["tbarrett@lutinemanagement.com"],
-                    subject="Accreditation Request",
-                    html_body=("<p>An event has been created that requires accreditation.</p>" + info_html)
-                )
-                if ok_acc:
-                    st.info("Accreditation request email sent.")
+                # Accreditation email
+                if accreditation_required:
+                    start_et = start_dt_utc.astimezone(ZoneInfo("America/New_York"))
+                    end_et = end_dt_utc.astimezone(ZoneInfo("America/New_York"))
+                    vp_label = {"teams": "Teams", "zoom": "Zoom", "other": "Virtual"}.get(virtual_provider, "Virtual")
+                    info_html = fmt_event_info(
+                        subject, start_et, end_et, is_all_day, tz_choice, client_value,
+                        event_type, location, vp_label, virtual_link, manager_name, manager_email
+                    )
+                    ok_acc, info_acc = send_email(
+                        to_addrs=["mkomenko@lutinemanagement.com"],
+                        cc_addrs=["tbarrett@lutinemanagement.com"],
+                        subject="Accreditation Request",
+                        html_body=("<p>An event has been created that requires accreditation.</p>" + info_html)
+                    )
+                    if ok_acc:
+                        st.info("Accreditation request email sent.")
+            else:
+                st.info("Saved to the app, but skipped emails because Outlook wasn’t created.")
+
 
 
 # ========
