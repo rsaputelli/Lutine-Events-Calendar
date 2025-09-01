@@ -1012,6 +1012,7 @@ with tab_create:
                 "accreditation_required": bool(accreditation_required),
                 "created_at": datetime.utcnow().isoformat(),
                 "outlook_body_html": patched_body_for_db,  # final body we sent to Outlook
+                "created_by": user["id"],  # ✅ store the Supabase auth user UUID
             }
             res_insert = supabase.table("events").insert(row).execute()
             if res_insert.data and len(res_insert.data) > 0:
