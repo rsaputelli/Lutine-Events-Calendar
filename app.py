@@ -428,41 +428,45 @@ def build_graph_event_payload(
     set_teams: bool,
     reminder_minutes: int,
 ) -> dict:
+    """
+    Build a Graph event payload.
+    - For all-day events, Graph expects date-only and an EXCLUSIVE end date (>= start + 1 day).
+    """
     payload: dict = {
         "subject": subject,
         "isReminderOn": True,
         "reminderMinutesBeforeStart": int(reminder_minutes),
         "body": {"contentType": "HTML", "content": body_html},
-        "showAs": "free",  # keep all-day bars at top
+        "showAs": "free",
     }
 
     if is_all_day:
-        # Accept datetime or date; convert to date-only for Graph (end is exclusive next-day)
+        # Normalize to date objects
         if isinstance(start_dt, datetime):
             start_date = start_dt.date()
         else:
             start_date = start_dt
+
         if isinstance(end_dt, datetime):
             end_date = end_dt.date()
         else:
             end_date = end_dt
 
+        # Graph end is EXCLUSIVE; ensure at least +1 day from the later of start/end
+        from datetime import timedelta
+        non_decreasing_end = max(end_date, start_date)
+        end_exclusive = non_decreasing_end + timedelta(days=1)
+
         payload.update({
             "isAllDay": True,
             "start": {"dateTime": start_date.isoformat(), "timeZone": tz_windows},
-            "end":   {"dateTime": end_date.isoformat(),   "timeZone": tz_windows},
+            "end":   {"dateTime": end_exclusive.isoformat(), "timeZone": tz_windows},
         })
     else:
-        # Timed event: keep wall times in the chosen Windows tz
-        if isinstance(start_dt, date):
-            raise ValueError("start_dt must be datetime when is_all_day is False")
-        if isinstance(end_dt, date):
-            raise ValueError("end_dt must be datetime when is_all_day is False")
-
+        # Timed event: use local wall times with Windows TZ label
         payload.update({
-            "isAllDay": False,
             "start": {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz_windows},
-            "end":   {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"),   "timeZone": tz_windows},
+            "end":   {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz_windows},
         })
 
     if location_str:
@@ -473,6 +477,7 @@ def build_graph_event_payload(
         payload["onlineMeetingProvider"] = "teamsForBusiness"
 
     return payload
+
 
 
 
