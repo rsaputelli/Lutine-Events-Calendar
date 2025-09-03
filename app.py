@@ -39,22 +39,40 @@ import streamlit.components.v1 as components
 # -----------------------------
 st.set_page_config(page_title="Lutine Master Calendar Intake", layout="wide")
 
-# --- Supabase invite/magic-link: move hash tokens to query params Streamlit can read ---
+import streamlit.components.v1 as components
+
+# --- Supabase invite/magic-link: move hash tokens to query params (iframe-safe) ---
 components.html(
     """
     <script>
       (function () {
-        try {
-          var h = window.location.hash;
-          if (h && h.indexOf('access_token=') !== -1) {
-            var qs = new URLSearchParams(h.substring(1)); // drop leading '#'
-            var url = new URL(window.location.href);
-            qs.forEach(function(v, k) { url.searchParams.set(k, v); });
-            url.hash = '';
-            window.location.replace(url.toString());
-          }
-        } catch (e) {
-          console && console.warn && console.warn('Hash→query shim error:', e);
+        // pick the top window (Streamlit components run in an iframe)
+        var loc = (function() {
+          try { if (window.parent && window.parent.location) return window.parent.location; } catch(e) {}
+          try { if (window.top && window.top.location) return window.top.location; } catch(e) {}
+          return window.location; // fallback
+        })();
+
+        function convertHashToQuery() {
+          try {
+            var h = loc.hash; // read hash from top window
+            if (h && h.indexOf('access_token=') !== -1) {
+              var qs = new URLSearchParams(h.substring(1)); // strip '#'
+              var url = new URL(loc.href);
+              qs.forEach(function(v, k) { url.searchParams.set(k, v); });
+              url.hash = '';
+              loc.replace(url.toString()); // replace top URL
+              return true;
+            }
+          } catch (e) {}
+          return false;
+        }
+
+        // run now; if hydration overwrites, retry briefly (~10s max)
+        if (!convertHashToQuery()) {
+          var n = 0, t = setInterval(function() {
+            if (convertHashToQuery() || ++n > 50) clearInterval(t);
+          }, 200);
         }
       })();
     </script>
@@ -110,12 +128,11 @@ def _sign_out():
         pass
     st.session_state.pop("auth_user", None)
     st.rerun()
-# --- Handle Supabase invite/signup links now that tokens are in query params ---
 def _qp(name: str):
     try:
         return st.query_params.get(name)              # Streamlit ≥ 1.32
     except Exception:
-        return st.experimental_get_query_params().get(name, [None])[0]  # older Streamlit
+        return st.experimental_get_query_params().get(name, [None])[0]
 
 def handle_supabase_link_tokens(auth_client):
     access_token  = _qp("access_token")
@@ -125,39 +142,60 @@ def handle_supabase_link_tokens(auth_client):
     if not (access_token and refresh_token):
         return  # nothing to do
 
-    # 1) Establish session from link tokens
+    # 1) Establish session from tokens
     try:
         auth_client.auth.set_session({"access_token": access_token, "refresh_token": refresh_token})
     except Exception as e:
         st.warning(f"Could not establish session from link: {e}")
         return
 
-    # 2) Show first-time password setup form
-    st.info("You're signed in from your invite link. Please create your password to finish setup.")
-    with st.form("first_password_set", clear_on_submit=False):
-        p1 = st.text_input("New password", type="password")
-        p2 = st.text_input("Confirm new password", type="password")
-        go = st.form_submit_button("Set password")
+    # Get user info from the live session (for your session_state)
+    try:
+        u = auth_client.auth.get_user()
+        user_email = getattr(getattr(u, "user", None), "email", None) or getattr(u, "email", None) or ""
+        user_id    = getattr(getattr(u, "user", None), "id", None)    or getattr(u, "id", None)    or ""
+    except Exception:
+        user_email = user_id = ""
 
-    if go:
-        if not p1 or p1 != p2:
-            st.error("Passwords don't match.")
-        else:
-            try:
-                auth_client.auth.update_user({"password": p1})
-                st.success("Password set! You can now use the Sign In form.")
+    # 2) Invite/Signup: first-time password set
+    if link_type in ("invite", "signup"):
+        st.info("You're signed in from your invite link. Please create your password to finish setup.")
+        with st.form("first_password_set", clear_on_submit=False):
+            p1 = st.text_input("New password", type="password")
+            p2 = st.text_input("Confirm new password", type="password")
+            go = st.form_submit_button("Set password")
+
+        if go:
+            if not p1 or p1 != p2:
+                st.error("Passwords don't match.")
+            else:
                 try:
-                    st.query_params.clear()         # Streamlit ≥ 1.32
-                except Exception:
-                    st.experimental_set_query_params()
-            except Exception as e:
-                st.error(f"Could not set password: {e}")
+                    auth_client.auth.update_user({"password": p1})
+                    # Persist auth and continue into app
+                    st.session_state["auth_user"] = {"email": user_email, "id": user_id}
+                    try:
+                        st.query_params.clear()
+                    except Exception:
+                        st.experimental_set_query_params()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not set password: {e}")
 
-    # IMPORTANT: Stop here so the normal Sign In UI doesn’t render under this
-    st.stop()
+        # Important: prevent login UI from rendering underneath
+        st.stop()
 
-# Run this before the recovery handler and before showing the sign-in form
+    # 3) Non-invite (magic link) OR user already has password:
+    # Persist session and continue into app without showing Login
+    st.session_state["auth_user"] = {"email": user_email, "id": user_id}
+    try:
+        st.query_params.clear()
+    except Exception:
+        st.experimental_set_query_params()
+    st.rerun()
+
+# Call stays here—right before the recovery handler/login UI
 handle_supabase_link_tokens(auth_client)
+
 
 
 # ---- Handle password recovery via query param (?recovery_token=...) ----
