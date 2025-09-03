@@ -37,6 +37,27 @@ from supabase import create_client as _create_client_for_auth
 # Config & Secrets
 # -----------------------------
 st.set_page_config(page_title="Lutine Master Calendar Intake", layout="wide")
+# --- Supabase invite/magic-link: move hash tokens to query params Streamlit can read ---
+st.markdown(
+    """
+    <script>
+      (function () {
+        try {
+          const h = window.location.hash;
+          if (h && h.includes('access_token')) {
+            const qs = new URLSearchParams(h.substring(1));
+            const url = new URL(window.location.href);
+            for (const [k,v] of qs.entries()) url.searchParams.set(k, v);
+            url.hash = '';
+            window.location.replace(url.toString());
+          }
+        } catch (e) {}
+      })();
+    </script>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # Header/logo (main page, replaces sidebar branding)
 logo_col, title_col = st.columns([1, 6])
@@ -85,6 +106,51 @@ def _sign_out():
         pass
     st.session_state.pop("auth_user", None)
     st.rerun()
+# --- Handle Supabase invite/signup links now that tokens are in query params ---
+def _qp(name: str):
+    try:
+        return st.query_params.get(name)              # Streamlit ≥ 1.32
+    except Exception:
+        return st.experimental_get_query_params().get(name, [None])[0]  # older Streamlit
+
+def handle_supabase_link_tokens(auth_client):
+    access_token  = _qp("access_token")
+    refresh_token = _qp("refresh_token")
+    link_type     = (_qp("type") or "").lower()  # "invite" | "signup" | "recovery" | ...
+
+    if not (access_token and refresh_token):
+        return
+
+    # Establish a session from the link (now in query params)
+    try:
+        auth_client.auth.set_session({"access_token": access_token, "refresh_token": refresh_token})
+    except Exception as e:
+        st.warning(f"Could not establish session from link: {e}")
+        return
+
+    # For first-time invite/signup, prompt user to set an initial password
+    if link_type in ("invite", "signup"):
+        st.success("Email verified. Create your password to finish setting up your account.")
+        with st.form("first_password_set"):
+            p1 = st.text_input("New password", type="password")
+            p2 = st.text_input("Confirm new password", type="password")
+            go = st.form_submit_button("Set password")
+        if go:
+            if not p1 or p1 != p2:
+                st.error("Passwords don't match.")
+            else:
+                try:
+                    auth_client.auth.update_user({"password": p1})
+                    st.success("Password set! You can now use the Sign In form.")
+                    try:
+                        st.query_params.clear()        # Streamlit ≥ 1.32
+                    except Exception:
+                        st.experimental_set_query_params()  # older: clears params
+                except Exception as e:
+                    st.error(f"Could not set password: {e}")
+
+# Run this before the recovery handler and before showing the sign-in form
+handle_supabase_link_tokens(auth_client)
 
 # ---- Handle password recovery via query param (?recovery_token=...) ----
 recovery_token = st.query_params.get("recovery_token")
