@@ -116,41 +116,45 @@ def _qp(name: str):
 def handle_supabase_link_tokens(auth_client):
     access_token  = _qp("access_token")
     refresh_token = _qp("refresh_token")
-    link_type     = (_qp("type") or "").lower()  # "invite" | "signup" | "recovery" | ...
+    link_type     = (_qp("type") or "").lower()
 
     if not (access_token and refresh_token):
-        return
+        return  # nothing to do
 
-    # Establish a session from the link (now in query params)
+    # 1) Establish session from link tokens
     try:
         auth_client.auth.set_session({"access_token": access_token, "refresh_token": refresh_token})
     except Exception as e:
         st.warning(f"Could not establish session from link: {e}")
         return
 
-    # For first-time invite/signup, prompt user to set an initial password
-    if link_type in ("invite", "signup"):
-        st.success("Email verified. Create your password to finish setting up your account.")
-        with st.form("first_password_set"):
-            p1 = st.text_input("New password", type="password")
-            p2 = st.text_input("Confirm new password", type="password")
-            go = st.form_submit_button("Set password")
-        if go:
-            if not p1 or p1 != p2:
-                st.error("Passwords don't match.")
-            else:
+    # 2) Show first-time password setup form
+    st.info("You're signed in from your invite link. Please create your password to finish setup.")
+    with st.form("first_password_set", clear_on_submit=False):
+        p1 = st.text_input("New password", type="password")
+        p2 = st.text_input("Confirm new password", type="password")
+        go = st.form_submit_button("Set password")
+
+    if go:
+        if not p1 or p1 != p2:
+            st.error("Passwords don't match.")
+        else:
+            try:
+                auth_client.auth.update_user({"password": p1})
+                st.success("Password set! You can now use the Sign In form.")
                 try:
-                    auth_client.auth.update_user({"password": p1})
-                    st.success("Password set! You can now use the Sign In form.")
-                    try:
-                        st.query_params.clear()        # Streamlit ≥ 1.32
-                    except Exception:
-                        st.experimental_set_query_params()  # older: clears params
-                except Exception as e:
-                    st.error(f"Could not set password: {e}")
+                    st.query_params.clear()         # Streamlit ≥ 1.32
+                except Exception:
+                    st.experimental_set_query_params()
+            except Exception as e:
+                st.error(f"Could not set password: {e}")
+
+    # IMPORTANT: Stop here so the normal Sign In UI doesn’t render under this
+    st.stop()
 
 # Run this before the recovery handler and before showing the sign-in form
 handle_supabase_link_tokens(auth_client)
+
 
 # ---- Handle password recovery via query param (?recovery_token=...) ----
 recovery_token = st.query_params.get("recovery_token")
