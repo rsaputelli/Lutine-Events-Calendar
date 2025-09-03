@@ -32,30 +32,34 @@ from urllib.parse import quote
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
 from supabase import create_client as _create_client_for_auth
+import streamlit.components.v1 as components
 
 # -----------------------------
 # Config & Secrets
 # -----------------------------
 st.set_page_config(page_title="Lutine Master Calendar Intake", layout="wide")
+
 # --- Supabase invite/magic-link: move hash tokens to query params Streamlit can read ---
-st.markdown(
+components.html(
     """
     <script>
       (function () {
         try {
-          const h = window.location.hash;
-          if (h && h.includes('access_token')) {
-            const qs = new URLSearchParams(h.substring(1));
-            const url = new URL(window.location.href);
-            for (const [k,v] of qs.entries()) url.searchParams.set(k, v);
+          var h = window.location.hash;
+          if (h && h.indexOf('access_token=') !== -1) {
+            var qs = new URLSearchParams(h.substring(1)); // drop leading '#'
+            var url = new URL(window.location.href);
+            qs.forEach(function(v, k) { url.searchParams.set(k, v); });
             url.hash = '';
             window.location.replace(url.toString());
           }
-        } catch (e) {}
+        } catch (e) {
+          console && console.warn && console.warn('Hash→query shim error:', e);
+        }
       })();
     </script>
     """,
-    unsafe_allow_html=True,
+    height=0,
 )
 
 
