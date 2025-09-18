@@ -33,6 +33,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 
 from supabase import create_client as _create_client_for_auth
 import streamlit.components.v1 as components
+import pandas as pd
 
 # -----------------------------
 # Config & Secrets
@@ -837,9 +838,7 @@ def fmt_event_info(subject: str, start_dt_et: datetime, end_dt_et: datetime,
 # -----------------------------
 # UI – Create & Edit Tabs
 # -----------------------------
-tab_create, tab_edit = st.tabs(["Create", "Edit"])
-
-
+tab_create, tab_edit, tab_table = st.tabs(["Create", "Edit", "Table"])
 
 # ==========
 # CREATE TAB
@@ -1794,6 +1793,100 @@ with st.sidebar.expander("Admin: Export Events to Word", expanded=False):
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             key="export_download_btn"
         )
+with tab_table:
+    st.subheader("Preview / Export as Table")
+
+    # --- Filters (ET window and optional client) ---
+    default_from = date.today().replace(day=1)
+    default_to   = date.today() + timedelta(days=120)
+
+    tv_from = st.date_input("From (ET)", value=st.session_state.get("table_from", default_from), key="table_from")
+    tv_to   = st.date_input("To (ET)",   value=st.session_state.get("table_to", default_to),   key="table_to")
+
+    clients = load_clients()
+    tv_client = st.selectbox(
+        "Client (optional)",
+        ["(all)"] + clients,
+        index=st.session_state.get("table_client_idx", 0),
+        key="table_client"
+    )
+
+    @st.cache_data(ttl=300)
+    def _load_events_for_table(from_d: date, to_d: date, client_filter: str) -> list[dict]:
+        # Match the same ET→UTC window and ordering used by the Word export
+        start_floor_utc = datetime.combine(from_d, time(0, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+        end_ceil_utc    = datetime.combine(to_d,   time(23,59), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+
+        q = supabase.table("events").select("*") \
+                 .gte("start_dt_utc", start_floor_utc.isoformat()) \
+                 .lte("start_dt_utc", end_ceil_utc.isoformat()) \
+                 .order("start_dt_utc", desc=False)
+        if client_filter and client_filter != "(all)":
+            q = q.eq("client", client_filter)
+        return q.execute().data or []
+
+    def _fmt_hhmm(dt: datetime) -> str:
+        s = dt.strftime("%I:%M %p")
+        return s.lstrip("0")
+
+    def _et(dt_utc_iso: str) -> datetime:
+        return datetime.fromisoformat(dt_utc_iso.replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York"))
+
+    def events_to_df(events: list[dict]) -> pd.DataFrame:
+        rows = []
+        for ev in events:
+            try:
+                start_et = _et(ev["start_dt_utc"])
+                end_et   = _et(ev["end_dt_utc"])
+            except Exception:
+                continue
+
+            # Location/virtual tag (mirrors Word export)
+            loc_or_v = ""
+            if (ev.get("event_type") or "").lower() == "in_person" and ev.get("location"):
+                loc_or_v = ev["location"]
+            elif (ev.get("event_type") or "").lower() == "virtual":
+                vp = (ev.get("virtual_provider") or "other").lower()
+                loc_or_v = {"teams": "Teams", "zoom": "Zoom"}.get(vp, "Virtual")
+
+            rows.append({
+                "Month": start_et.strftime("%B %Y").upper(),
+                "Date (ET)": start_et.strftime("%b %d, %Y"),
+                "Start (ET)": "" if ev.get("is_all_day") else _fmt_hhmm(start_et),
+                "End (ET)": "" if ev.get("is_all_day") else _fmt_hhmm(end_et),
+                "All-day": bool(ev.get("is_all_day")),
+                "Client": ev.get("client") or "",
+                "Subject": (ev.get("subject") or "(No subject)") + (f" ({loc_or_v})" if loc_or_v else ""),
+                "Manager": ev.get("meeting_manager_name") or "",
+                "Accred.": "Y" if ev.get("accreditation_required") else "N",
+                "Outlook ID": ev.get("outlook_event_id") or "",
+                "Virtual Link": ev.get("virtual_link") or "",
+            })
+
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df["__sort_month"] = pd.to_datetime(df["Date (ET)"])
+            df = df.sort_values(["__sort_month", "Start (ET)"], kind="stable").drop(columns="__sort_month")
+        return df
+
+    # Load on click (keep UI snappy)
+    if st.button("Load table preview", key="load_table_preview"):
+        try:
+            evs = _load_events_for_table(tv_from, tv_to, tv_client)
+            df = events_to_df(evs)
+            if df.empty:
+                st.info("No events found for this window.")
+            else:
+                st.dataframe(df, hide_index=True, use_container_width=True)
+                st.download_button(
+                    "Download CSV",
+                    data=df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"Master_Calendar_Table_{tv_from}_{tv_to}.csv",
+                    mime="text/csv",
+                )
+        except Exception as e:
+            st.error(f"Failed to load preview: {e}")
+
 # -----------------------------
 # Admin Tools (Sidebar)
 # -----------------------------
@@ -1945,6 +2038,7 @@ with st.sidebar:
     #st.markdown("- Streamlit secrets: **graph**, **supabase**")
     #st.markdown("- Optional SMTP secrets for email: **smtp** (host, port, user, password, from_addr, from_name)")
     #st.caption("Time zones: stored as UTC + IANA; Graph uses Windows TZ IDs. Events are created with showAs=Free. Accreditation email sent if selected.")
+
 
 
 
