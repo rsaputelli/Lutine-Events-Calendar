@@ -254,14 +254,14 @@ if not user:
 st.sidebar.success(f"Signed in as {user['email']}")
 # --- Fetch current user's role from Supabase profiles ---
 @st.cache_data(ttl=120)
-def _get_user_role(email: str) -> str:
+def _get_user_role(user_id: str) -> str:
     try:
-        if supabase is None:
+        if supabase is None or not user_id:
             return "viewer"
         res = (
             supabase.table("profiles")
             .select("role")
-            .eq("email", email)
+            .eq("user_id", user_id)
             .limit(1)
             .execute()
         )
@@ -270,10 +270,15 @@ def _get_user_role(email: str) -> str:
     except Exception:
         return "viewer"
 
-ROLE = (_get_user_role(user.get("email") or "") or "viewer").lower()
+ROLE = (_get_user_role(user.get("id") or "") or "viewer").lower()
 st.session_state["role"] = ROLE
-st.sidebar.caption(f"Role: **{ROLE}**")
 
+CAN_CREATE = ROLE in ("admin", "editor")
+CAN_DELETE = ROLE == "admin"
+CAN_EDIT_ALL = ROLE in ("admin", "editor")
+CAN_EDIT_ASSIGNED = ROLE == "meeting_manager"
+
+st.sidebar.caption(f"Role: **{ROLE}**")
 
 if st.sidebar.button("Sign out"):
     _sign_out()
@@ -665,13 +670,24 @@ def load_clients() -> List[str]:
     except Exception:
         return []
 
-
-def load_managers() -> List[Tuple[str, str]]:
+def load_managers() -> List[Tuple[str, str, str]]:
     try:
         if supabase is None:
             return []
-        res = supabase.table("meeting_managers").select("name,email").order("name").execute()
-        return [(r["name"], r.get("email", "")) for r in (res.data or [])]
+        res = (
+            supabase.table("meeting_managers")
+            .select("auth_user_id,name,email")
+            .order("name")
+            .execute()
+        )
+        return [
+            (
+                r.get("auth_user_id") or "",
+                r.get("name") or "",
+                r.get("email") or "",
+            )
+            for r in (res.data or [])
+        ]
     except Exception:
         return []
         
@@ -845,7 +861,11 @@ tab_create, tab_edit, tab_table = st.tabs(["Create", "Edit", "Table"])
 # ==========
 with tab_create:
     st.subheader("Create Event & Post to Master Calendar")
-
+    
+    if not CAN_CREATE:
+        st.info("You have view-only access for event creation.")
+        st.stop()
+    
     # -- Persist all-day flag outside the form so conditional fields update immediately
     if "is_all_day" not in st.session_state:
         st.session_state["is_all_day"] = False
@@ -949,12 +969,22 @@ with tab_create:
 
         # Meeting Manager dropdown with Other
         st.markdown("**Meeting Manager (internal only):**")
-        managers = load_managers()  # list of (name,email)
-        manager_labels = [f"{n} <{e}>" if e else n for n, e in managers]
-        manager_sel = st.selectbox("Choose manager", manager_labels + ["Other…"],
-                                   index=(0 if managers else 0), key="create_mm_sel")
+        managers = load_managers()  # list of (auth_user_id, name, email)
+        manager_labels = [
+            f"{name} <{email}>" if email else name
+            for auth_user_id, name, email in managers
+        ]
+        manager_sel = st.selectbox(
+            "Choose manager",
+            manager_labels + ["Other…"],
+            index=(0 if managers else 0),
+            key="create_mm_sel"
+        )
+
         manager_name = ""
         manager_email = ""
+        manager_user_id = None
+
         if manager_sel == "Other…":
             mm_col1, mm_col2 = st.columns(2)
             manager_name = mm_col1.text_input("Name *", "", key="create_mm_name")
@@ -962,7 +992,7 @@ with tab_create:
         else:
             idx = manager_labels.index(manager_sel) if manager_sel in manager_labels else -1
             if idx >= 0:
-                manager_name, manager_email = managers[idx]
+                manager_user_id, manager_name, manager_email = managers[idx]
 
         # Optional Notes (included in Outlook body)
         notes = st.text_area("Notes (included in Outlook event body)", key="create_notes")
@@ -1118,6 +1148,7 @@ with tab_create:
                 "virtual_link": (virtual_link or None),
                 "meeting_manager_name": manager_name,
                 "meeting_manager_email": manager_email,
+                "meeting_manager_user_id": manager_user_id or None,
                 "reminder_minutes": int(rem_minutes_for_graph),
                 "outlook_event_id": outlook_event_id,
                 "accreditation_required": bool(accreditation_required),
@@ -1245,16 +1276,36 @@ with tab_edit:
         st.info("Supabase not configured.")
     else:
         try:
-            q = supabase.table("events").select("*").gte("start_dt_utc", datetime.combine(f_start, time(0,0)).isoformat()).lte("start_dt_utc", datetime.combine(f_end, time(23,59)).isoformat()).order("start_dt_utc", desc=False)
+            q = (
+                supabase.table("events")
+                .select("*")
+                .gte("start_dt_utc", datetime.combine(f_start, time(0, 0)).isoformat())
+                .lte("start_dt_utc", datetime.combine(f_end, time(23, 59)).isoformat())
+                .order("start_dt_utc", desc=False)
+            )
+
             if f_client and f_client != "(all)":
                 q = q.eq("client", f_client)
-            res = q.execute()
-            edit_events = res.data or []
+
+            if CAN_EDIT_ASSIGNED and not CAN_EDIT_ALL:
+                q = q.eq("meeting_manager_user_id", user["id"])
+            elif not CAN_EDIT_ALL and not CAN_EDIT_ASSIGNED:
+                edit_events = []
+            else:
+                pass
+
+            if CAN_EDIT_ALL or CAN_EDIT_ASSIGNED:
+                res = q.execute()
+                edit_events = res.data or []
+
         except Exception as e:
             st.error(f"Failed to load events: {e}")
 
     if not edit_events:
-        st.caption("No events found for the selected filters.")
+        if ROLE == "viewer":
+            st.caption("You do not have edit access.")
+        else:
+            st.caption("No events found for the selected filters.")
         st.stop()
 
     # Select event to edit
@@ -1301,29 +1352,30 @@ with tab_edit:
             st.session_state["edit_rem_mode"] = "On date/time (Email via app)"
             st.session_state["edit_reminder_datetime_local"] = datetime.combine(date.today(), time(9,0))
     
-    st.markdown("### Danger Zone")
-    c1, c2 = st.columns([1, 3])
-    confirm_del = c1.checkbox("Yes, delete this event", key="confirm_delete_ev")
-    if c2.button("Delete Event", type="secondary", disabled=not confirm_del):
-        try:
-            # 1) Delete from Outlook first (if present)
-            if ev.get("outlook_event_id") and not missing:
-                tok = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+        if CAN_DELETE:
+            st.markdown("---")
+            st.markdown("### Danger Zone")
+            c1, c2 = st.columns([1, 3])
+            confirm_del = c1.checkbox("Yes, delete this event", key="confirm_delete_ev")
+            if c2.button("Delete Event", type="secondary", disabled=not confirm_del):
                 try:
-                    graph_delete_event(tok, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"])
+                    # 1) Delete from Outlook first (if present)
+                    if ev.get("outlook_event_id") and not missing:
+                        tok = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+                        try:
+                            graph_delete_event(tok, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"])
+                        except Exception as e:
+                            # Don’t block DB cleanup if Outlook delete had a hiccup
+                            st.warning(f"Outlook delete issue (continuing): {e}")
+
+                    # 2) Delete from Supabase; notifications will cascade via FK
+                    supabase.table("events").delete().eq("id", ev["id"]).execute()
+
+                    st.success("Event deleted.")
+                    st.stop()  # stop to refresh UI cleanly
                 except Exception as e:
-                    # Don’t block DB cleanup if Outlook delete had a hiccup
-                    st.warning(f"Outlook delete issue (continuing): {e}")
-
-            # 2) Delete from Supabase; notifications will cascade via FK
-            supabase.table("events").delete().eq("id", ev["id"]).execute()
-
-            st.success("Event deleted.")
-            st.stop()  # stop to refresh UI cleanly
-        except Exception as e:
-            st.error(f"Delete failed: {e}")
-  
-
+                    st.error(f"Delete failed: {e}")
+      
     # Prefill fields
     subject_e = st.text_input("Event Title *", ev.get("subject") or "", key="edit_subject")
     tz_label_e = "Eastern"  # default for display; use stored timezone_display to infer
@@ -1379,21 +1431,34 @@ with tab_edit:
     accreditation_required_e = st.selectbox("CME/Accreditation Required?", ["No", "Yes"], index=(1 if ev.get("accreditation_required") else 0), key="edit_acc") == "Yes"
     st.markdown("---")
     managers_e = load_managers()
-    manager_labels_e = [f"{n} <{e}>" if e else n for n, e in managers_e]
-    # preselect matching manager if possible
+    manager_labels_e = [
+        f"{name} <{email}>" if email else name
+        for auth_user_id, name, email in managers_e
+    ]
+
     default_label = f"{ev.get('meeting_manager_name') or ''} <{ev.get('meeting_manager_email') or ''}>".strip()
     try_idx = manager_labels_e.index(default_label) if default_label in manager_labels_e else 0
-    manager_sel_e = st.selectbox("Choose manager", manager_labels_e + ["Other…"], index=(try_idx if manager_labels_e else 0), key="edit_mm_sel")
+
+    manager_sel_e = st.selectbox(
+        "Choose manager",
+        manager_labels_e + ["Other…"],
+        index=(try_idx if manager_labels_e else 0),
+        key="edit_mm_sel"
+    )
+
     manager_name_e = ev.get("meeting_manager_name") or ""
     manager_email_e = ev.get("meeting_manager_email") or ""
+    manager_user_id_e = ev.get("meeting_manager_user_id")
+
     if manager_sel_e == "Other…":
         mm2c1, mm2c2 = st.columns(2)
         manager_name_e = mm2c1.text_input("Name *", manager_name_e, key="edit_mm_name")
         manager_email_e = mm2c2.text_input("Email *", manager_email_e, key="edit_mm_email")
+        manager_user_id_e = None
     else:
         idx2 = manager_labels_e.index(manager_sel_e) if manager_sel_e in manager_labels_e else -1
         if idx2 >= 0:
-            manager_name_e, manager_email_e = managers_e[idx2]
+            manager_user_id_e, manager_name_e, manager_email_e = managers_e[idx2]
 
     # Reminder modes (edit)
     rem2c1, rem2c2 = st.columns([1, 2])
@@ -1558,6 +1623,7 @@ with tab_edit:
                     "virtual_link": (virtual_link_e or None),
                     "meeting_manager_name": manager_name_e,
                     "meeting_manager_email": manager_email_e,
+                    "meeting_manager_user_id": manager_user_id_e or None,
                     "reminder_minutes": int(rem_minutes_for_graph_e),
                     "accreditation_required": bool(accreditation_required_e),
                     "updated_at": datetime.utcnow().isoformat(),
