@@ -42,2069 +42,2076 @@ st.set_page_config(page_title="Lutine Master Calendar Intake", layout="wide")
 
 import streamlit.components.v1 as components
 
-# --- Supabase invite/magic-link: move hash tokens to query params (iframe-safe) ---
-components.html(
-    """
-    <script>
-      (function () {
-        // pick the top window (Streamlit components run in an iframe)
-        var loc = (function() {
-          try { if (window.parent && window.parent.location) return window.parent.location; } catch(e) {}
-          try { if (window.top && window.top.location) return window.top.location; } catch(e) {}
-          return window.location; // fallback
-        })();
+def calendar_page():
 
-        function convertHashToQuery() {
-          try {
-            var h = loc.hash; // read hash from top window
-            if (h && h.indexOf('access_token=') !== -1) {
-              var qs = new URLSearchParams(h.substring(1)); // strip '#'
-              var url = new URL(loc.href);
-              qs.forEach(function(v, k) { url.searchParams.set(k, v); });
-              url.hash = '';
-              loc.replace(url.toString()); // replace top URL
-              return true;
+    # --- Supabase invite/magic-link: move hash tokens to query params (iframe-safe) ---
+    components.html(
+        """
+        <script>
+          (function () {
+            // pick the top window (Streamlit components run in an iframe)
+            var loc = (function() {
+              try { if (window.parent && window.parent.location) return window.parent.location; } catch(e) {}
+              try { if (window.top && window.top.location) return window.top.location; } catch(e) {}
+              return window.location; // fallback
+            })();
+
+            function convertHashToQuery() {
+              try {
+                var h = loc.hash; // read hash from top window
+                if (h && h.indexOf('access_token=') !== -1) {
+                  var qs = new URLSearchParams(h.substring(1)); // strip '#'
+                  var url = new URL(loc.href);
+                  qs.forEach(function(v, k) { url.searchParams.set(k, v); });
+                  url.hash = '';
+                  loc.replace(url.toString()); // replace top URL
+                  return true;
+                }
+              } catch (e) {}
+              return false;
             }
-          } catch (e) {}
-          return false;
-        }
 
-        // run now; if hydration overwrites, retry briefly (~10s max)
-        if (!convertHashToQuery()) {
-          var n = 0, t = setInterval(function() {
-            if (convertHashToQuery() || ++n > 50) clearInterval(t);
-          }, 200);
-        }
-      })();
-    </script>
-    """,
-    height=0,
-)
+            // run now; if hydration overwrites, retry briefly (~10s max)
+            if (!convertHashToQuery()) {
+              var n = 0, t = setInterval(function() {
+                if (convertHashToQuery() || ++n > 50) clearInterval(t);
+              }, 200);
+            }
+          })();
+        </script>
+        """,
+        height=0,
+    )
 
 
-# Header/logo (main page, replaces sidebar branding)
-logo_col, title_col = st.columns([1, 6])
-with logo_col:
-    st.image("assets/lutine-logo.png", width=230)
-with title_col:
-    st.title("Master Calendar Intake Form")
-    st.caption("Use this form to add or edit Master Calendar")
+    # Header/logo (main page, replaces sidebar branding)
+    logo_col, title_col = st.columns([1, 6])
+    with logo_col:
+        st.image("assets/lutine-logo.png", width=230)
+    with title_col:
+        st.title("Master Calendar Intake Form")
+        st.caption("Use this form to add or edit Master Calendar")
 
 
-GRAPH = st.secrets.get("graph", {})
-SUPA = st.secrets.get("supabase", {})
-SMTP = st.secrets.get("smtp", {})  # optional: host, port, user, password, from_addr, from_name
+    GRAPH = st.secrets.get("graph", {})
+    SUPA = st.secrets.get("supabase", {})
+    SMTP = st.secrets.get("smtp", {})  # optional: host, port, user, password, from_addr, from_name
 
-missing = []
-for k in ("tenant_id", "client_id", "client_secret", "shared_mailbox_upn"):
-    if not GRAPH.get(k):
-        missing.append(f"graph.{k}")
-for k in ("url", "key"):
-    if not SUPA.get(k):
-        missing.append(f"supabase.{k}")
-if missing:
-    st.warning("Secrets missing: " + ", ".join(missing) + ". You can still explore the form, but submissions will be disabled.")
+    missing = []
+    for k in ("tenant_id", "client_id", "client_secret", "shared_mailbox_upn"):
+        if not GRAPH.get(k):
+            missing.append(f"graph.{k}")
+    for k in ("url", "key"):
+        if not SUPA.get(k):
+            missing.append(f"supabase.{k}")
+    if missing:
+        st.warning("Secrets missing: " + ", ".join(missing) + ". You can still explore the form, but submissions will be disabled.")
 
-supabase: Client | None = None
-if SUPA.get("url") and SUPA.get("key"):
-    supabase = create_client(SUPA["url"], SUPA["key"])
-    
-# ==== AUTH GATE (pure Supabase; no external widget) ====
+    supabase: Client | None = None
+    if SUPA.get("url") and SUPA.get("key"):
+        supabase = create_client(SUPA["url"], SUPA["key"])
+        
+    # ==== AUTH GATE (pure Supabase; no external widget) ====
 
-_SUPA = st.secrets.get("supabase", {})
-_SUPA_URL  = _SUPA.get("url")
-_SUPA_ANON = _SUPA.get("anon_key")  # MUST be the anon/public key (NOT service key)
-_SITE_URL  = _SUPA.get("site_url")  # e.g., "https://lutine-master-cal.streamlit.app"
+    _SUPA = st.secrets.get("supabase", {})
+    _SUPA_URL  = _SUPA.get("url")
+    _SUPA_ANON = _SUPA.get("anon_key")  # MUST be the anon/public key (NOT service key)
+    _SITE_URL  = _SUPA.get("site_url")  # e.g., "https://lutine-master-cal.streamlit.app"
 
-if not (_SUPA_URL and _SUPA_ANON):
-    st.error("Supabase anon key missing. Add supabase.anon_key to st.secrets for auth.")
-    st.stop()
-
-auth_client = _create_client_for_auth(_SUPA_URL, _SUPA_ANON)
-
-def _sign_out():
-    try:
-        auth_client.auth.sign_out()
-    except Exception:
-        pass
-    st.session_state.pop("auth_user", None)
-    st.rerun()
-def _qp(name: str):
-    try:
-        return st.query_params.get(name)              # Streamlit ≥ 1.32
-    except Exception:
-        return st.experimental_get_query_params().get(name, [None])[0]
-
-def handle_supabase_link_tokens(auth_client):
-    access_token  = _qp("access_token")
-    refresh_token = _qp("refresh_token")
-    link_type     = (_qp("type") or "").lower()
-
-    if not (access_token and refresh_token):
-        return  # nothing to do
-
-    # 1) Establish session from tokens
-    try:
-        auth_client.auth.set_session({"access_token": access_token, "refresh_token": refresh_token})
-    except Exception as e:
-        st.warning(f"Could not establish session from link: {e}")
-        return
-
-    # Get user info from the live session (for your session_state)
-    try:
-        u = auth_client.auth.get_user()
-        user_email = getattr(getattr(u, "user", None), "email", None) or getattr(u, "email", None) or ""
-        user_id    = getattr(getattr(u, "user", None), "id", None)    or getattr(u, "id", None)    or ""
-    except Exception:
-        user_email = user_id = ""
-
-    # 2) Invite/Signup: first-time password set
-    if link_type in ("invite", "signup"):
-        st.info("You're signed in from your invite link. Please create your password to finish setup.")
-        with st.form("first_password_set", clear_on_submit=False):
-            p1 = st.text_input("New password", type="password")
-            p2 = st.text_input("Confirm new password", type="password")
-            go = st.form_submit_button("Set password")
-
-        if go:
-            if not p1 or p1 != p2:
-                st.error("Passwords don't match.")
-            else:
-                try:
-                    auth_client.auth.update_user({"password": p1})
-                    # Persist auth and continue into app
-                    st.session_state["auth_user"] = {"email": user_email, "id": user_id}
-                    try:
-                        st.query_params.clear()
-                    except Exception:
-                        st.experimental_set_query_params()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Could not set password: {e}")
-
-        # Important: prevent login UI from rendering underneath
+    if not (_SUPA_URL and _SUPA_ANON):
+        st.error("Supabase anon key missing. Add supabase.anon_key to st.secrets for auth.")
         st.stop()
 
-    # 3) Non-invite (magic link) OR user already has password:
-    # Persist session and continue into app without showing Login
-    st.session_state["auth_user"] = {"email": user_email, "id": user_id}
-    try:
-        st.query_params.clear()
-    except Exception:
-        st.experimental_set_query_params()
-    st.rerun()
+    auth_client = _create_client_for_auth(_SUPA_URL, _SUPA_ANON)
 
-# Call stays here—right before the recovery handler/login UI
-handle_supabase_link_tokens(auth_client)
-
-
-
-# ---- Handle password recovery via query param (?recovery_token=...) ----
-recovery_token = st.query_params.get("recovery_token")
-if recovery_token:
-    st.subheader("Set a new password")
-    new1 = st.text_input("New password", type="password", key="pw1")
-    new2 = st.text_input("Confirm new password", type="password", key="pw2")
-    if st.button("Update password"):
-        if not new1 or new1 != new2:
-            st.error("Passwords must match.")
-        else:
-            try:
-                # Verify token (temporary session), then update password
-                auth_client.auth.verify_otp({"type": "recovery", "token_hash": recovery_token})
-                auth_client.auth.update_user({"password": new1})
-                st.success("Password updated. Return to previous window and sign in.")
-                st.query_params.clear()  # remove token from URL
-            except Exception as e:
-                st.error(f"Reset failed: {e}")
-    st.stop()
-
-# ---- Sign-in (no signup UI) ----
-user = st.session_state.get("auth_user")
-if not user:
-    with st.form("auth_signin"):
-        email = st.text_input("Work email", "")
-        pw    = st.text_input("Password", "", type="password")
-        cols = st.columns([1,1,3])
-        submit = cols[0].form_submit_button("Sign in")
-        forgot = cols[1].form_submit_button("Forgot password")
-    if submit:
+    def _sign_out():
         try:
-            res = auth_client.auth.sign_in_with_password({"email": email, "password": pw})
-            if res and res.user:
-                st.session_state["auth_user"] = {"email": res.user.email, "id": res.user.id}
-                st.rerun()
+            auth_client.auth.sign_out()
+        except Exception:
+            pass
+        st.session_state.pop("auth_user", None)
+        st.rerun()
+    def _qp(name: str):
+        try:
+            return st.query_params.get(name)              # Streamlit ≥ 1.32
+        except Exception:
+            return st.experimental_get_query_params().get(name, [None])[0]
+
+    def handle_supabase_link_tokens(auth_client):
+        access_token  = _qp("access_token")
+        refresh_token = _qp("refresh_token")
+        link_type     = (_qp("type") or "").lower()
+
+        if not (access_token and refresh_token):
+            return  # nothing to do
+
+        # 1) Establish session from tokens
+        try:
+            auth_client.auth.set_session({"access_token": access_token, "refresh_token": refresh_token})
+        except Exception as e:
+            st.warning(f"Could not establish session from link: {e}")
+            return
+
+        # Get user info from the live session (for your session_state)
+        try:
+            u = auth_client.auth.get_user()
+            user_email = getattr(getattr(u, "user", None), "email", None) or getattr(u, "email", None) or ""
+            user_id    = getattr(getattr(u, "user", None), "id", None)    or getattr(u, "id", None)    or ""
+        except Exception:
+            user_email = user_id = ""
+
+        # 2) Invite/Signup: first-time password set
+        if link_type in ("invite", "signup"):
+            st.info("You're signed in from your invite link. Please create your password to finish setup.")
+            with st.form("first_password_set", clear_on_submit=False):
+                p1 = st.text_input("New password", type="password")
+                p2 = st.text_input("Confirm new password", type="password")
+                go = st.form_submit_button("Set password")
+
+            if go:
+                if not p1 or p1 != p2:
+                    st.error("Passwords don't match.")
+                else:
+                    try:
+                        auth_client.auth.update_user({"password": p1})
+                        # Persist auth and continue into app
+                        st.session_state["auth_user"] = {"email": user_email, "id": user_id}
+                        try:
+                            st.query_params.clear()
+                        except Exception:
+                            st.experimental_set_query_params()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not set password: {e}")
+
+            # Important: prevent login UI from rendering underneath
+            st.stop()
+
+        # 3) Non-invite (magic link) OR user already has password:
+        # Persist session and continue into app without showing Login
+        st.session_state["auth_user"] = {"email": user_email, "id": user_id}
+        try:
+            st.query_params.clear()
+        except Exception:
+            st.experimental_set_query_params()
+        st.rerun()
+
+    # Call stays here—right before the recovery handler/login UI
+    handle_supabase_link_tokens(auth_client)
+
+
+
+    # ---- Handle password recovery via query param (?recovery_token=...) ----
+    recovery_token = st.query_params.get("recovery_token")
+    if recovery_token:
+        st.subheader("Set a new password")
+        new1 = st.text_input("New password", type="password", key="pw1")
+        new2 = st.text_input("Confirm new password", type="password", key="pw2")
+        if st.button("Update password"):
+            if not new1 or new1 != new2:
+                st.error("Passwords must match.")
             else:
-                st.error("Sign in failed.")
-        except Exception as e:
-            st.error(f"Sign in error: {e}")
-    elif forgot:
+                try:
+                    # Verify token (temporary session), then update password
+                    auth_client.auth.verify_otp({"type": "recovery", "token_hash": recovery_token})
+                    auth_client.auth.update_user({"password": new1})
+                    st.success("Password updated. Return to previous window and sign in.")
+                    st.query_params.clear()  # remove token from URL
+                except Exception as e:
+                    st.error(f"Reset failed: {e}")
+        st.stop()
+
+    # ---- Sign-in (no signup UI) ----
+    user = st.session_state.get("auth_user")
+    if not user:
+        with st.form("auth_signin"):
+            email = st.text_input("Work email", "")
+            pw    = st.text_input("Password", "", type="password")
+            cols = st.columns([1,1,3])
+            submit = cols[0].form_submit_button("Sign in")
+            forgot = cols[1].form_submit_button("Forgot password")
+        if submit:
+            try:
+                res = auth_client.auth.sign_in_with_password({"email": email, "password": pw})
+            except Exception as e:
+                st.error(f"Sign in error: {e}")
+            else:
+                if res and res.user:
+                    st.session_state["auth_user"] = {"email": res.user.email, "id": res.user.id}
+                    st.rerun()
+                else:
+                    st.error("Sign in failed.")
+        elif forgot:
+            try:
+                # Supabase will send a reset email that links back to your Site URL
+                auth_client.auth.reset_password_for_email(
+                    email,
+                    options={"redirect_to": _SITE_URL} if _SITE_URL else None
+                )
+                st.success("If that email exists, a reset link has been sent.")
+            except Exception as e:
+                st.error(f"Reset link error: {e}")
+        st.stop()
+
+    # ---- Authenticated: show who & sign out ----
+    st.sidebar.success(f"Signed in as {user['email']}")
+    # --- Fetch current user's role from Supabase profiles ---
+    @st.cache_data(ttl=120)
+    def _get_user_role(user_id: str) -> str:
         try:
-            # Supabase will send a reset email that links back to your Site URL
-            auth_client.auth.reset_password_for_email(
-                email,
-                options={"redirect_to": _SITE_URL} if _SITE_URL else None
+            if supabase is None or not user_id:
+                return "viewer"
+            res = (
+                supabase.table("profiles")
+                .select("role")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
             )
-            st.success("If that email exists, a reset link has been sent.")
-        except Exception as e:
-            st.error(f"Reset link error: {e}")
-    st.stop()
-
-# ---- Authenticated: show who & sign out ----
-st.sidebar.success(f"Signed in as {user['email']}")
-# --- Fetch current user's role from Supabase profiles ---
-@st.cache_data(ttl=120)
-def _get_user_role(user_id: str) -> str:
-    try:
-        if supabase is None or not user_id:
+            role = (res.data or [{}])[0].get("role") or "viewer"
+            return role
+        except Exception:
             return "viewer"
-        res = (
-            supabase.table("profiles")
-            .select("role")
-            .eq("user_id", user_id)
-            .limit(1)
-            .execute()
-        )
-        role = (res.data or [{}])[0].get("role") or "viewer"
-        return role
-    except Exception:
-        return "viewer"
 
-ROLE = (_get_user_role(user.get("id") or "") or "viewer").lower()
-st.session_state["role"] = ROLE
+    ROLE = (_get_user_role(user.get("id") or "") or "viewer").lower()
+    st.session_state["role"] = ROLE
 
-CAN_CREATE = ROLE in ("admin", "editor")
-CAN_DELETE = ROLE == "admin"
-CAN_EDIT_ALL = ROLE in ("admin", "editor")
-CAN_EDIT_ASSIGNED = ROLE == "meeting_manager"
+    CAN_CREATE = ROLE in ("admin", "editor")
+    CAN_DELETE = ROLE == "admin"
+    CAN_EDIT_ALL = ROLE in ("admin", "editor")
+    CAN_EDIT_ASSIGNED = ROLE == "meeting_manager"
 
-st.sidebar.caption(f"Role: **{ROLE}**")
+    st.sidebar.caption(f"Role: **{ROLE}**")
 
-if st.sidebar.button("Sign out"):
-    _sign_out()
-    
-    
-# ==== /AUTH GATE ====
-
-
-
-
-# -----------------------------
-# Helper: Time zones (US) -> Windows TZ IDs for Graph
-# -----------------------------
-TZ_MAP = {
-    "Eastern": "Eastern Standard Time",
-    "Central": "Central Standard Time",
-    "Mountain": "Mountain Standard Time",
-    "Pacific": "Pacific Standard Time",
-    "Alaska": "Alaskan Standard Time",
-    "Hawaii": "Hawaiian Standard Time",
-}
-IANA_MAP = {
-    "Eastern": "America/New_York",
-    "Central": "America/Chicago",
-    "Mountain": "America/Denver",
-    "Pacific": "America/Los_Angeles",
-    "Alaska": "America/Anchorage",
-    "Hawaii": "Pacific/Honolulu",
-}
-
-
-# -----------------------------
-# Graph OAuth + Event Create
-# -----------------------------
-
-def get_graph_token(tenant_id: str, client_id: str, client_secret: str) -> str:
-    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-    data = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "scope": "https://graph.microsoft.com/.default",
-        "grant_type": "client_credentials",
-    }
-    resp = requests.post(token_url, data=data, timeout=20)
-    resp.raise_for_status()
-    return resp.json()["access_token"]
-
-
-def graph_create_event(token: str, shared_mailbox_upn: str, payload: dict) -> dict:
-    url = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/calendar/events"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    r = requests.post(url, headers=headers, json=payload, timeout=20)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Graph error {r.status_code}: {r.text}")
-    return r.json()
-    
-def update_outlook_event(token: str, upn: str, event_id: str, payload: dict):
-    """PATCH an existing event in Outlook (used by the Edit tab)."""
-    url = f"https://graph.microsoft.com/v1.0/users/{upn}/events/{event_id}"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    r = requests.patch(url, headers=headers, json=payload, timeout=20)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Graph PATCH {r.status_code}: {r.text}")
-    return r.json()
-
-def graph_delete_event(token: str, shared_mailbox_upn: str, outlook_event_id: str):
-    """DELETE an event in Outlook. 204 = deleted; 404 = already gone."""
-    url = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/events/{outlook_event_id}"
-    headers = {"Authorization": f"Bearer {token}"}
-    r = requests.delete(url, headers=headers, timeout=20)
-    if r.status_code not in (204, 404):
-        raise RuntimeError(f"Graph DELETE {r.status_code}: {r.text}")
+    if st.sidebar.button("Sign out"):
+        _sign_out()
         
+        
+    # ==== /AUTH GATE ====
 
-def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, mailbox_upn: str, token: str) -> bool:
-    """
-    Ensure exactly ONE 'Meeting Manager + [App Outlook Event ID: …]' block.
-    Strips any legacy p/div/span/table blocks regardless of styling, then appends one 11pt table block.
-    """
-    try:
-        get_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_upn}/events/{outlook_event_id}"
+
+
+
+    # -----------------------------
+    # Helper: Time zones (US) -> Windows TZ IDs for Graph
+    # -----------------------------
+    TZ_MAP = {
+        "Eastern": "Eastern Standard Time",
+        "Central": "Central Standard Time",
+        "Mountain": "Mountain Standard Time",
+        "Pacific": "Pacific Standard Time",
+        "Alaska": "Alaskan Standard Time",
+        "Hawaii": "Hawaiian Standard Time",
+    }
+    IANA_MAP = {
+        "Eastern": "America/New_York",
+        "Central": "America/Chicago",
+        "Mountain": "America/Denver",
+        "Pacific": "America/Los_Angeles",
+        "Alaska": "America/Anchorage",
+        "Hawaii": "Pacific/Honolulu",
+    }
+
+
+    # -----------------------------
+    # Graph OAuth + Event Create
+    # -----------------------------
+
+    def get_graph_token(tenant_id: str, client_id: str, client_secret: str) -> str:
+        token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+        data = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": "https://graph.microsoft.com/.default",
+            "grant_type": "client_credentials",
+        }
+        resp = requests.post(token_url, data=data, timeout=20)
+        resp.raise_for_status()
+        return resp.json()["access_token"]
+
+
+    def graph_create_event(token: str, shared_mailbox_upn: str, payload: dict) -> dict:
+        url = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/calendar/events"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        r = requests.post(url, headers=headers, json=payload, timeout=20)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Graph error {r.status_code}: {r.text}")
+        return r.json()
+        
+    def update_outlook_event(token: str, upn: str, event_id: str, payload: dict):
+        """PATCH an existing event in Outlook (used by the Edit tab)."""
+        url = f"https://graph.microsoft.com/v1.0/users/{upn}/events/{event_id}"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        r = requests.patch(url, headers=headers, json=payload, timeout=20)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Graph PATCH {r.status_code}: {r.text}")
+        return r.json()
+
+    def graph_delete_event(token: str, shared_mailbox_upn: str, outlook_event_id: str):
+        """DELETE an event in Outlook. 204 = deleted; 404 = already gone."""
+        url = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/events/{outlook_event_id}"
+        headers = {"Authorization": f"Bearer {token}"}
+        r = requests.delete(url, headers=headers, timeout=20)
+        if r.status_code not in (204, 404):
+            raise RuntimeError(f"Graph DELETE {r.status_code}: {r.text}")
+            
+
+    def update_outlook_manager_block(outlook_event_id: str, manager_name: str, *, mailbox_upn: str, token: str) -> bool:
+        """
+        Ensure exactly ONE 'Meeting Manager + [App Outlook Event ID: …]' block.
+        Strips any legacy p/div/span/table blocks regardless of styling, then appends one 11pt table block.
+        """
+        try:
+            get_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_upn}/events/{outlook_event_id}"
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # 1) Fetch body
+            r = requests.get(get_url, headers=headers, timeout=15)
+            r.raise_for_status()
+            body = (r.json() or {}).get("body", {}) or {}
+            ctype = (body.get("contentType") or "html").lower()
+            cur_html = body.get("content") or ""
+            if ctype == "text" and cur_html:
+                from html import escape
+                cur_html = f"<pre>{escape(cur_html)}</pre>"
+
+            # 2) Preserve an existing ID if present anywhere
+            m_id = re.search(r"\[(?:App\s+)?Outlook\s+Event\s+ID:?\s*(?P<eid>[^\]]+)\]", cur_html, flags=re.I)
+            preserved_id = (m_id.group("eid").strip() if m_id else "") or outlook_event_id
+
+            # 3) Remove ANY existing Manager block variants (tables, blocks, mixed wrappers)
+            # a) any <table> ... contains both phrases
+            pat_table = re.compile(r"<table\b.*?>.*?Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].*?</table>",
+                                   re.I | re.S)
+            # b) any block tag (p/div/span/td) containing both phrases
+            pat_block = re.compile(r"<(?P<tag>p|div|span|td)\b[^>]*>.*?Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].*?</(?P=tag)>",
+                                   re.I | re.S)
+            # c) belt-and-suspenders: inline fragment (manager … ID …) across tags within ~1500 chars
+            pat_inline = re.compile(r"Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].{0,50}", re.I | re.S)
+
+            changed = True
+            while changed:
+                new_html = pat_table.sub("", cur_html)
+                new_html = pat_block.sub("", new_html)
+                new_html = pat_inline.sub("", new_html)
+                changed = (new_html != cur_html)
+                cur_html = new_html
+
+            # 4) Append ONE normalized 11pt table block (Outlook-friendly)
+            safe_mgr = html.escape(manager_name)
+            safe_id  = html.escape(preserved_id)
+            block = (
+                "<table role='presentation' style='border-collapse:collapse;border-spacing:0;margin:0;padding:0;'>"
+                "<tr><td style='font-family:Segoe UI, Arial, sans-serif; font-size:11pt; color:#c00000;'>"
+                f"<b>Meeting Manager: {safe_mgr}</b><br><br>"
+                f"<b>[App Outlook Event ID: {safe_id}]</b>"
+                "</td></tr></table>"
+            )
+            new_html = cur_html + block
+
+            p = requests.patch(
+                get_url,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"body": {"contentType": "HTML", "content": new_html}},
+                timeout=20,
+            )
+            p.raise_for_status()
+            return True
+
+        except Exception:
+            return False
+
+    def graph_get_event(token: str, upn: str, event_id: str) -> dict:
+        """GET one event by Graph ID (URL-encodes the ID)."""
+        if not event_id:
+            raise ValueError("event_id is required")
+        url = f"https://graph.microsoft.com/v1.0/users/{upn}/events/{quote(event_id, safe='')}"
+        headers = {"Authorization": f"Bearer {token}"}
+        r = requests.get(url, headers=headers, timeout=20)
+        r.raise_for_status()
+        return r.json()
+
+
+            
+    def graph_datetime_obj(dt_local, *, tz_windows: str) -> dict:
+        """
+        Convert a timezone-aware local datetime to the MS Graph event datetime object.
+        Graph expects local wall time and a Windows time zone ID.
+        """
+        # Ensure dt_local is timezone-aware in the target local zone before formatting
+        if getattr(dt_local, "tzinfo", None) is None:
+            raise ValueError("dt_local must be timezone-aware")
+
+        return {
+            "dateTime": dt_local.strftime("%Y-%m-%dT%H:%M:%S"),
+            "timeZone": tz_windows,  # e.g., "Eastern Standard Time"
+        }
+     # --- Helper: upsert Client + Accreditation lines in Outlook body (keeps Manager block untouched) ---
+    import re, html as _html, requests
+    from urllib.parse import quote
+
+    def upsert_outlook_client_and_accreditation(*, token: str, mailbox_upn: str, event_id: str,
+                                                client_value: str | None, accreditation_required: bool,
+                                                remove_virtual_line: bool = True) -> bool:
+        """
+        Normalize Outlook body to have EXACTLY ONE:
+          - <p><b>Client:</b> ...</p>   (if client provided)
+          - <p><b>Accreditation:</b> Yes|No</p>
+        placed immediately BEFORE the Meeting Manager block.
+        Removes ALL legacy Client/Accreditation lines (incl. 'Accreditation Required:') and
+        (optionally) removes any 'Virtual:' line left from older creates.
+        Leaves the red Meeting Manager block intact.
+        """
+        try:
+            get_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_upn}/events/{quote(event_id, safe='')}"
+            hdrs = {"Authorization": f"Bearer {token}"}
+            r = requests.get(get_url, headers=hdrs, timeout=15)
+            r.raise_for_status()
+            body = (r.json() or {}).get("body", {}) or {}
+            ctype = (body.get("contentType") or "html").lower()
+            cur_html = body.get("content") or ""
+            if ctype == "text" and cur_html:
+                from html import escape as _esc
+                cur_html = f"<pre>{_esc(cur_html)}</pre>"
+
+            html_in = cur_html
+
+            # Build desired lines
+            safe_client = _html.escape(client_value) if client_value else ""
+            desired_client = f"<p><b>Client:</b> {safe_client}</p>" if safe_client else ""
+            acc_flag = "Yes" if accreditation_required else "No"
+            desired_acc = f"<p><b>Accreditation:</b> {acc_flag}</p>"
+
+            # Broad, style-agnostic patterns
+            re_client = re.compile(r"<p[^>]*>\s*<b>\s*Client\s*:\s*</b>\s*.*?</p>", re.I | re.S)
+            re_acc    = re.compile(r"<p[^>]*>\s*<b>\s*Accreditation(?: Required)?\s*:\s*</b>\s*(Yes|No)\s*</p>", re.I | re.S)
+            re_virtual= re.compile(r"<p[^>]*>\s*<b>\s*Virtual\s*:\s*</b>\s*.*?</p>", re.I | re.S)
+            re_mgr_anchor = re.compile(
+                r"(?i)(?:<table\b[^>]*>.*?Meeting\s*Manager:.*?</table>)|"
+                r"(?:<p\b[^>]*>.*?Meeting\s*Manager:.*?</p>)|"
+                r"(?:<div\b[^>]*>.*?Meeting\s*Manager:.*?</div>)|"
+                r"(?:<span\b[^>]*>.*?Meeting\s*Manager:.*?</span>)|"
+                r"(?:<td\b[^>]*>.*?Meeting\s*Manager:.*?</td>)",
+                re.S
+            )
+
+            # 1) Strip ALL existing client/accreditation (and optional legacy Virtual) lines everywhere
+            html_in = re_client.sub("", html_in)
+            html_in = re_acc.sub("", html_in)
+            if remove_virtual_line:
+                html_in = re_virtual.sub("", html_in)
+
+            # 2) Prepare the combined insertion (client is optional)
+            insert_block = (desired_client + desired_acc) if desired_client else desired_acc
+
+            # 3) Insert immediately BEFORE the manager anchor if present; else prepend
+            m_anchor = re_mgr_anchor.search(html_in)
+            if m_anchor:
+                html_out = html_in[:m_anchor.start()] + insert_block + html_in[m_anchor.start():]
+            else:
+                html_out = insert_block + html_in
+
+            # 4) Patch back
+            p = requests.patch(
+                get_url,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"body": {"contentType": "HTML", "content": html_out}},
+                timeout=20,
+            )
+            p.raise_for_status()
+            return True
+
+        except Exception:
+            return False
+       
+
+    # -----------------------------
+    # Email helpers (optional)
+    # -----------------------------
+
+    def send_email(to_addrs, subject: str, html_body: str, cc_addrs=None):
+        """Send HTML email via SMTP settings in [smtp] secrets. Returns (ok: bool, info: str)."""
+        if not SMTP:
+            return False, "SMTP not configured"
+
+        # Normalize inputs to lists
+        if isinstance(to_addrs, str):
+            to_addrs = [to_addrs]
+        if cc_addrs is None:
+            cc_addrs = []
+        elif isinstance(cc_addrs, str):
+            cc_addrs = [cc_addrs]
+
+        try:
+            msg = MIMEText(html_body, "html")
+            msg["Subject"] = subject
+            from_addr = SMTP.get("from_addr", SMTP.get("user"))
+            from_name = SMTP.get("from_name", "Lutine Calendar Bot")
+            msg["From"] = formataddr((from_name, from_addr))
+            msg["To"] = ", ".join(to_addrs)
+            if cc_addrs:
+                msg["Cc"] = ", ".join(cc_addrs)
+            with smtplib.SMTP(SMTP.get("host"), int(SMTP.get("port", 587))) as server:
+                server.starttls()
+                server.login(SMTP.get("user"), SMTP.get("password"))
+                server.sendmail(from_addr, to_addrs + cc_addrs, msg.as_string())
+            return True, "sent"
+        except Exception as e:
+            return False, str(e)
+
+    # -----------------------------
+    # Payload builder
+    # -----------------------------
+
+    def build_graph_event_payload(
+        subject: str,
+        body_html: str,
+        tz_windows: str,
+        start_dt: datetime | date,
+        end_dt: datetime | date,
+        is_all_day: bool,
+        location_str: str | None,
+        set_teams: bool,
+        reminder_minutes: int,
+    ) -> dict:
+        """
+        Build a Graph event payload.
+        - For all-day events, Graph expects date-only and an EXCLUSIVE end date (>= start + 1 day).
+        """
+        payload: dict = {
+            "subject": subject,
+            "isReminderOn": True,
+            "reminderMinutesBeforeStart": int(reminder_minutes),
+            "body": {"contentType": "HTML", "content": body_html},
+            "showAs": "free",
+        }
+
+        if is_all_day:
+            # Normalize to date objects
+            if isinstance(start_dt, datetime):
+                start_date = start_dt.date()
+            else:
+                start_date = start_dt
+
+            if isinstance(end_dt, datetime):
+                end_date = end_dt.date()
+            else:
+                end_date = end_dt
+
+            # Graph end is EXCLUSIVE; ensure at least +1 day from the later of start/end
+            non_decreasing_end = max(end_date, start_date)
+            end_exclusive = non_decreasing_end + timedelta(days=1)
+
+            payload.update({
+                "isAllDay": True,
+                "start": {"dateTime": start_date.isoformat(), "timeZone": tz_windows},
+                "end":   {"dateTime": end_exclusive.isoformat(), "timeZone": tz_windows},
+            })
+        else:
+            # Timed event: use local wall times with Windows TZ label
+            payload.update({
+                "start": {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz_windows},
+                "end":   {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz_windows},
+            })
+
+        if location_str:
+            payload["location"] = {"displayName": location_str}
+
+        if set_teams:
+            payload["isOnlineMeeting"] = True
+            payload["onlineMeetingProvider"] = "teamsForBusiness"
+
+        return payload
+
+
+
+
+
+    # -----------------------------
+    # UI helpers – AM/PM selectors
+    # -----------------------------
+
+    def ampm_time_picker(label_prefix: str, default: time = time(9, 0), key_prefix: str = "") -> time:
+        colh, colm, cola = st.columns([1, 1, 1])
+        hour_12 = default.hour % 12
+        hour_12 = 12 if hour_12 == 0 else hour_12
+        ampm = "AM" if default.hour < 12 else "PM"
+
+        h = colh.selectbox(
+            f"{label_prefix} Hour", list(range(1, 13)),
+            index=list(range(1, 13)).index(hour_12),
+            key=f"{key_prefix}_hour"
+        )
+        m = colm.selectbox(
+            f"{label_prefix} Min", [0, 15, 30, 45],
+            index=[0, 15, 30, 45].index(default.minute if default.minute in [0, 15, 30, 45] else 0),
+            key=f"{key_prefix}_min"
+        )
+        a = cola.selectbox(
+            f"{label_prefix} AM/PM", ["AM", "PM"],
+            index=["AM", "PM"].index(ampm),
+            key=f"{key_prefix}_ampm"
+        )
+
+        hh = (h % 12) + (12 if a == "PM" and h != 12 else 0)
+        if a == "AM" and h == 12:
+            hh = 0
+        return time(hh, m)
+
+
+    # -----------------------------
+    # Load dropdown data (clients & managers)
+    # -----------------------------
+
+    def load_clients() -> List[str]:
+        try:
+            if supabase is None:
+                return []
+            res = supabase.table("clients").select("name").order("name").execute()
+            return [r["name"] for r in (res.data or [])]
+        except Exception:
+            return []
+
+    def load_managers() -> List[Tuple[str, str, str]]:
+        try:
+            if supabase is None:
+                return []
+            res = (
+                supabase.table("meeting_managers")
+                .select("auth_user_id,name,email")
+                .order("name")
+                .execute()
+            )
+            return [
+                (
+                    r.get("auth_user_id") or "",
+                    r.get("name") or "",
+                    r.get("email") or "",
+                )
+                for r in (res.data or [])
+            ]
+        except Exception:
+            return []
+            
+    # ---- Graph delta bookmark helpers (Supabase) ----
+    def get_delta_link(scope: str = "default") -> str | None:
+        if supabase is None:
+            return None
+        res = supabase.table("graph_state").select("delta_link").eq("scope", scope).limit(1).execute()
+        rows = res.data or []
+        return rows[0]["delta_link"] if rows and rows[0].get("delta_link") else None
+
+    def save_delta_link(delta_link: str, scope: str = "default") -> None:
+        if supabase is None:
+            return
+        supabase.table("graph_state").upsert({
+            "scope": scope,
+            "delta_link": delta_link,
+            "last_synced": datetime.utcnow().isoformat()
+        }, on_conflict="scope").execute()
+        
+    # ---------- Graph GET single event ----------
+    def graph_get_event(token: str, shared_mailbox_upn: str, event_id: str) -> dict:
+        url = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/events/{event_id}"
+        headers = {"Authorization": f"Bearer {token}"}
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Graph getEvent {r.status_code}: {r.text}")
+        return r.json()
+
+    # ---------- Graph delta (calendarView) ----------
+    def graph_delta_events(token: str, shared_mailbox_upn: str, start_iso: str | None, end_iso: str | None, delta_link: str | None = None):
+        """
+        If delta_link is provided, call it directly (it already includes query params).
+        Otherwise, call calendarView/delta with a UTC window using requests' params= to ensure proper URL encoding.
+        Yields page dicts; each page may contain '@odata.nextLink' or '@odata.deltaLink'.
+        """
         headers = {"Authorization": f"Bearer {token}"}
 
-        # 1) Fetch body
-        r = requests.get(get_url, headers=headers, timeout=15)
-        r.raise_for_status()
-        body = (r.json() or {}).get("body", {}) or {}
-        ctype = (body.get("contentType") or "html").lower()
-        cur_html = body.get("content") or ""
-        if ctype == "text" and cur_html:
-            from html import escape
-            cur_html = f"<pre>{escape(cur_html)}</pre>"
+        if delta_link:
+            next_url = delta_link
+            while next_url:
+                r = requests.get(next_url, headers=headers, timeout=30)
+                if r.status_code >= 400:
+                    raise RuntimeError(f"Graph delta {r.status_code}: {r.text}")
+                page = r.json()
+                yield page
+                next_url = page.get("@odata.nextLink")
+            return
 
-        # 2) Preserve an existing ID if present anywhere
-        m_id = re.search(r"\[(?:App\s+)?Outlook\s+Event\s+ID:?\s*(?P<eid>[^\]]+)\]", cur_html, flags=re.I)
-        preserved_id = (m_id.group("eid").strip() if m_id else "") or outlook_event_id
+        # First-time windowed delta (encode params properly)
+        base = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/calendarView/delta"
+        params = {}
+        if start_iso: params["startDateTime"] = start_iso
+        if end_iso:   params["endDateTime"] = end_iso
 
-        # 3) Remove ANY existing Manager block variants (tables, blocks, mixed wrappers)
-        # a) any <table> ... contains both phrases
-        pat_table = re.compile(r"<table\b.*?>.*?Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].*?</table>",
-                               re.I | re.S)
-        # b) any block tag (p/div/span/td) containing both phrases
-        pat_block = re.compile(r"<(?P<tag>p|div|span|td)\b[^>]*>.*?Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].*?</(?P=tag)>",
-                               re.I | re.S)
-        # c) belt-and-suspenders: inline fragment (manager … ID …) across tags within ~1500 chars
-        pat_inline = re.compile(r"Meeting\s*Manager:.*?\[.*?Outlook\s+Event\s+ID.*?\].{0,50}", re.I | re.S)
-
-        changed = True
-        while changed:
-            new_html = pat_table.sub("", cur_html)
-            new_html = pat_block.sub("", new_html)
-            new_html = pat_inline.sub("", new_html)
-            changed = (new_html != cur_html)
-            cur_html = new_html
-
-        # 4) Append ONE normalized 11pt table block (Outlook-friendly)
-        safe_mgr = html.escape(manager_name)
-        safe_id  = html.escape(preserved_id)
-        block = (
-            "<table role='presentation' style='border-collapse:collapse;border-spacing:0;margin:0;padding:0;'>"
-            "<tr><td style='font-family:Segoe UI, Arial, sans-serif; font-size:11pt; color:#c00000;'>"
-            f"<b>Meeting Manager: {safe_mgr}</b><br><br>"
-            f"<b>[App Outlook Event ID: {safe_id}]</b>"
-            "</td></tr></table>"
-        )
-        new_html = cur_html + block
-
-        p = requests.patch(
-            get_url,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"body": {"contentType": "HTML", "content": new_html}},
-            timeout=20,
-        )
-        p.raise_for_status()
-        return True
-
-    except Exception:
-        return False
-
-def graph_get_event(token: str, upn: str, event_id: str) -> dict:
-    """GET one event by Graph ID (URL-encodes the ID)."""
-    if not event_id:
-        raise ValueError("event_id is required")
-    url = f"https://graph.microsoft.com/v1.0/users/{upn}/events/{quote(event_id, safe='')}"
-    headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get(url, headers=headers, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
-
-        
-def graph_datetime_obj(dt_local, *, tz_windows: str) -> dict:
-    """
-    Convert a timezone-aware local datetime to the MS Graph event datetime object.
-    Graph expects local wall time and a Windows time zone ID.
-    """
-    # Ensure dt_local is timezone-aware in the target local zone before formatting
-    if getattr(dt_local, "tzinfo", None) is None:
-        raise ValueError("dt_local must be timezone-aware")
-
-    return {
-        "dateTime": dt_local.strftime("%Y-%m-%dT%H:%M:%S"),
-        "timeZone": tz_windows,  # e.g., "Eastern Standard Time"
-    }
- # --- Helper: upsert Client + Accreditation lines in Outlook body (keeps Manager block untouched) ---
-import re, html as _html, requests
-from urllib.parse import quote
-
-def upsert_outlook_client_and_accreditation(*, token: str, mailbox_upn: str, event_id: str,
-                                            client_value: str | None, accreditation_required: bool,
-                                            remove_virtual_line: bool = True) -> bool:
-    """
-    Normalize Outlook body to have EXACTLY ONE:
-      - <p><b>Client:</b> ...</p>   (if client provided)
-      - <p><b>Accreditation:</b> Yes|No</p>
-    placed immediately BEFORE the Meeting Manager block.
-    Removes ALL legacy Client/Accreditation lines (incl. 'Accreditation Required:') and
-    (optionally) removes any 'Virtual:' line left from older creates.
-    Leaves the red Meeting Manager block intact.
-    """
-    try:
-        get_url = f"https://graph.microsoft.com/v1.0/users/{mailbox_upn}/events/{quote(event_id, safe='')}"
-        hdrs = {"Authorization": f"Bearer {token}"}
-        r = requests.get(get_url, headers=hdrs, timeout=15)
-        r.raise_for_status()
-        body = (r.json() or {}).get("body", {}) or {}
-        ctype = (body.get("contentType") or "html").lower()
-        cur_html = body.get("content") or ""
-        if ctype == "text" and cur_html:
-            from html import escape as _esc
-            cur_html = f"<pre>{_esc(cur_html)}</pre>"
-
-        html_in = cur_html
-
-        # Build desired lines
-        safe_client = _html.escape(client_value) if client_value else ""
-        desired_client = f"<p><b>Client:</b> {safe_client}</p>" if safe_client else ""
-        acc_flag = "Yes" if accreditation_required else "No"
-        desired_acc = f"<p><b>Accreditation:</b> {acc_flag}</p>"
-
-        # Broad, style-agnostic patterns
-        re_client = re.compile(r"<p[^>]*>\s*<b>\s*Client\s*:\s*</b>\s*.*?</p>", re.I | re.S)
-        re_acc    = re.compile(r"<p[^>]*>\s*<b>\s*Accreditation(?: Required)?\s*:\s*</b>\s*(Yes|No)\s*</p>", re.I | re.S)
-        re_virtual= re.compile(r"<p[^>]*>\s*<b>\s*Virtual\s*:\s*</b>\s*.*?</p>", re.I | re.S)
-        re_mgr_anchor = re.compile(
-            r"(?i)(?:<table\b[^>]*>.*?Meeting\s*Manager:.*?</table>)|"
-            r"(?:<p\b[^>]*>.*?Meeting\s*Manager:.*?</p>)|"
-            r"(?:<div\b[^>]*>.*?Meeting\s*Manager:.*?</div>)|"
-            r"(?:<span\b[^>]*>.*?Meeting\s*Manager:.*?</span>)|"
-            r"(?:<td\b[^>]*>.*?Meeting\s*Manager:.*?</td>)",
-            re.S
-        )
-
-        # 1) Strip ALL existing client/accreditation (and optional legacy Virtual) lines everywhere
-        html_in = re_client.sub("", html_in)
-        html_in = re_acc.sub("", html_in)
-        if remove_virtual_line:
-            html_in = re_virtual.sub("", html_in)
-
-        # 2) Prepare the combined insertion (client is optional)
-        insert_block = (desired_client + desired_acc) if desired_client else desired_acc
-
-        # 3) Insert immediately BEFORE the manager anchor if present; else prepend
-        m_anchor = re_mgr_anchor.search(html_in)
-        if m_anchor:
-            html_out = html_in[:m_anchor.start()] + insert_block + html_in[m_anchor.start():]
-        else:
-            html_out = insert_block + html_in
-
-        # 4) Patch back
-        p = requests.patch(
-            get_url,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"body": {"contentType": "HTML", "content": html_out}},
-            timeout=20,
-        )
-        p.raise_for_status()
-        return True
-
-    except Exception:
-        return False
-   
-
-# -----------------------------
-# Email helpers (optional)
-# -----------------------------
-
-def send_email(to_addrs, subject: str, html_body: str, cc_addrs=None):
-    """Send HTML email via SMTP settings in [smtp] secrets. Returns (ok: bool, info: str)."""
-    if not SMTP:
-        return False, "SMTP not configured"
-
-    # Normalize inputs to lists
-    if isinstance(to_addrs, str):
-        to_addrs = [to_addrs]
-    if cc_addrs is None:
-        cc_addrs = []
-    elif isinstance(cc_addrs, str):
-        cc_addrs = [cc_addrs]
-
-    try:
-        msg = MIMEText(html_body, "html")
-        msg["Subject"] = subject
-        from_addr = SMTP.get("from_addr", SMTP.get("user"))
-        from_name = SMTP.get("from_name", "Lutine Calendar Bot")
-        msg["From"] = formataddr((from_name, from_addr))
-        msg["To"] = ", ".join(to_addrs)
-        if cc_addrs:
-            msg["Cc"] = ", ".join(cc_addrs)
-        with smtplib.SMTP(SMTP.get("host"), int(SMTP.get("port", 587))) as server:
-            server.starttls()
-            server.login(SMTP.get("user"), SMTP.get("password"))
-            server.sendmail(from_addr, to_addrs + cc_addrs, msg.as_string())
-        return True, "sent"
-    except Exception as e:
-        return False, str(e)
-
-# -----------------------------
-# Payload builder
-# -----------------------------
-
-def build_graph_event_payload(
-    subject: str,
-    body_html: str,
-    tz_windows: str,
-    start_dt: datetime | date,
-    end_dt: datetime | date,
-    is_all_day: bool,
-    location_str: str | None,
-    set_teams: bool,
-    reminder_minutes: int,
-) -> dict:
-    """
-    Build a Graph event payload.
-    - For all-day events, Graph expects date-only and an EXCLUSIVE end date (>= start + 1 day).
-    """
-    payload: dict = {
-        "subject": subject,
-        "isReminderOn": True,
-        "reminderMinutesBeforeStart": int(reminder_minutes),
-        "body": {"contentType": "HTML", "content": body_html},
-        "showAs": "free",
-    }
-
-    if is_all_day:
-        # Normalize to date objects
-        if isinstance(start_dt, datetime):
-            start_date = start_dt.date()
-        else:
-            start_date = start_dt
-
-        if isinstance(end_dt, datetime):
-            end_date = end_dt.date()
-        else:
-            end_date = end_dt
-
-        # Graph end is EXCLUSIVE; ensure at least +1 day from the later of start/end
-        from datetime import timedelta
-        non_decreasing_end = max(end_date, start_date)
-        end_exclusive = non_decreasing_end + timedelta(days=1)
-
-        payload.update({
-            "isAllDay": True,
-            "start": {"dateTime": start_date.isoformat(), "timeZone": tz_windows},
-            "end":   {"dateTime": end_exclusive.isoformat(), "timeZone": tz_windows},
-        })
-    else:
-        # Timed event: use local wall times with Windows TZ label
-        payload.update({
-            "start": {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz_windows},
-            "end":   {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz_windows},
-        })
-
-    if location_str:
-        payload["location"] = {"displayName": location_str}
-
-    if set_teams:
-        payload["isOnlineMeeting"] = True
-        payload["onlineMeetingProvider"] = "teamsForBusiness"
-
-    return payload
-
-
-
-
-
-# -----------------------------
-# UI helpers – AM/PM selectors
-# -----------------------------
-
-def ampm_time_picker(label_prefix: str, default: time = time(9, 0), key_prefix: str = "") -> time:
-    colh, colm, cola = st.columns([1, 1, 1])
-    hour_12 = default.hour % 12
-    hour_12 = 12 if hour_12 == 0 else hour_12
-    ampm = "AM" if default.hour < 12 else "PM"
-
-    h = colh.selectbox(
-        f"{label_prefix} Hour", list(range(1, 13)),
-        index=list(range(1, 13)).index(hour_12),
-        key=f"{key_prefix}_hour"
-    )
-    m = colm.selectbox(
-        f"{label_prefix} Min", [0, 15, 30, 45],
-        index=[0, 15, 30, 45].index(default.minute if default.minute in [0, 15, 30, 45] else 0),
-        key=f"{key_prefix}_min"
-    )
-    a = cola.selectbox(
-        f"{label_prefix} AM/PM", ["AM", "PM"],
-        index=["AM", "PM"].index(ampm),
-        key=f"{key_prefix}_ampm"
-    )
-
-    hh = (h % 12) + (12 if a == "PM" and h != 12 else 0)
-    if a == "AM" and h == 12:
-        hh = 0
-    return time(hh, m)
-
-
-# -----------------------------
-# Load dropdown data (clients & managers)
-# -----------------------------
-
-def load_clients() -> List[str]:
-    try:
-        if supabase is None:
-            return []
-        res = supabase.table("clients").select("name").order("name").execute()
-        return [r["name"] for r in (res.data or [])]
-    except Exception:
-        return []
-
-def load_managers() -> List[Tuple[str, str, str]]:
-    try:
-        if supabase is None:
-            return []
-        res = (
-            supabase.table("meeting_managers")
-            .select("auth_user_id,name,email")
-            .order("name")
-            .execute()
-        )
-        return [
-            (
-                r.get("auth_user_id") or "",
-                r.get("name") or "",
-                r.get("email") or "",
-            )
-            for r in (res.data or [])
-        ]
-    except Exception:
-        return []
-        
-# ---- Graph delta bookmark helpers (Supabase) ----
-def get_delta_link(scope: str = "default") -> str | None:
-    if supabase is None:
-        return None
-    res = supabase.table("graph_state").select("delta_link").eq("scope", scope).limit(1).execute()
-    rows = res.data or []
-    return rows[0]["delta_link"] if rows and rows[0].get("delta_link") else None
-
-def save_delta_link(delta_link: str, scope: str = "default") -> None:
-    if supabase is None:
-        return
-    supabase.table("graph_state").upsert({
-        "scope": scope,
-        "delta_link": delta_link,
-        "last_synced": datetime.utcnow().isoformat()
-    }, on_conflict="scope").execute()
-    
-# ---------- Graph GET single event ----------
-def graph_get_event(token: str, shared_mailbox_upn: str, event_id: str) -> dict:
-    url = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/events/{event_id}"
-    headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get(url, headers=headers, timeout=20)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Graph getEvent {r.status_code}: {r.text}")
-    return r.json()
-
-# ---------- Graph delta (calendarView) ----------
-def graph_delta_events(token: str, shared_mailbox_upn: str, start_iso: str | None, end_iso: str | None, delta_link: str | None = None):
-    """
-    If delta_link is provided, call it directly (it already includes query params).
-    Otherwise, call calendarView/delta with a UTC window using requests' params= to ensure proper URL encoding.
-    Yields page dicts; each page may contain '@odata.nextLink' or '@odata.deltaLink'.
-    """
-    headers = {"Authorization": f"Bearer {token}"}
-
-    if delta_link:
-        next_url = delta_link
-        while next_url:
-            r = requests.get(next_url, headers=headers, timeout=30)
+        next_link = None
+        while True:
+            if next_link:
+                r = requests.get(next_link, headers=headers, timeout=30)
+            else:
+                r = requests.get(base, headers=headers, params=params, timeout=30)
             if r.status_code >= 400:
                 raise RuntimeError(f"Graph delta {r.status_code}: {r.text}")
             page = r.json()
             yield page
-            next_url = page.get("@odata.nextLink")
-        return
-
-    # First-time windowed delta (encode params properly)
-    base = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/calendarView/delta"
-    params = {}
-    if start_iso: params["startDateTime"] = start_iso
-    if end_iso:   params["endDateTime"] = end_iso
-
-    next_link = None
-    while True:
-        if next_link:
-            r = requests.get(next_link, headers=headers, timeout=30)
-        else:
-            r = requests.get(base, headers=headers, params=params, timeout=30)
-        if r.status_code >= 400:
-            raise RuntimeError(f"Graph delta {r.status_code}: {r.text}")
-        page = r.json()
-        yield page
-        next_link = page.get("@odata.nextLink")
-        if not next_link:
-            break
-  
-# ---------- Outlook → App field mapping helpers ----------
-from zoneinfo import ZoneInfo
-from datetime import datetime
-
-def _parse_graph_dt_to_utc(dt_obj: dict) -> str | None:
-    """
-    Convert Graph dateTime dict -> UTC ISO string.
-    Accepts values like:
-      {"dateTime":"2025-09-01T09:00:00.0000000","timeZone":"Eastern Standard Time"}
-    Logic:
-      - If string has a 'Z' or offset, we trust it and convert to UTC.
-      - If naive, treat as UTC (safe fallback for our use case).
-    """
-    if not dt_obj or not dt_obj.get("dateTime"):
-        return None
-    dt_raw = dt_obj["dateTime"]
-    try:
-        dt = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-        return dt.astimezone(ZoneInfo("UTC")).isoformat()
-    except Exception:
-        return None
-
-def map_graph_event_to_row_updates(g: dict) -> dict:
-    """
-    Return ONLY the Outlook-owned fields you want to overwrite in 'events'.
-    Internal app fields (deliverables, accreditation, manager, etc.) are untouched.
-    """
-    updates = {}
-
-    # Subject (optional—enable if you want Outlook title to win)
-    subj = g.get("subject")
-    if subj:
-        updates["subject"] = subj
-
-    # All-day
-    updates["is_all_day"] = bool(g.get("isAllDay"))
-
-    # Start/End (UTC ISO)
-    start_utc = _parse_graph_dt_to_utc(g.get("start"))
-    end_utc   = _parse_graph_dt_to_utc(g.get("end"))
-    if start_utc: updates["start_dt_utc"] = start_utc
-    if end_utc:   updates["end_dt_utc"] = end_utc
-
-    # Location (only physical display name)
-    loc = (g.get("location") or {}).get("displayName") or ""
-    if loc:
-        updates["location"] = loc
-
-    # Teams/online meeting URL → virtual_link (only fill/refresh the link)
-    om = g.get("onlineMeeting")
-    if isinstance(om, dict):
-        join_url = om.get("joinUrl")
-        if join_url:
-            updates["virtual_link"] = join_url
-
-    return updates
+            next_link = page.get("@odata.nextLink")
+            if not next_link:
+                break
       
+    # ---------- Outlook → App field mapping helpers ----------
 
-# -----------------------------
-# Formatting helper for emails
-# -----------------------------
+    def _parse_graph_dt_to_utc(dt_obj: dict) -> str | None:
+        """
+        Convert Graph dateTime dict -> UTC ISO string.
+        Accepts values like:
+          {"dateTime":"2025-09-01T09:00:00.0000000","timeZone":"Eastern Standard Time"}
+        Logic:
+          - If string has a 'Z' or offset, we trust it and convert to UTC.
+          - If naive, treat as UTC (safe fallback for our use case).
+        """
+        if not dt_obj or not dt_obj.get("dateTime"):
+            return None
+        dt_raw = dt_obj["dateTime"]
+        try:
+            dt = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+            return dt.astimezone(ZoneInfo("UTC")).isoformat()
+        except Exception:
+            return None
 
-def fmt_event_info(subject: str, start_dt_et: datetime, end_dt_et: datetime,
-                   is_all_day: bool, tz_label: str, client_value: str,
-                   event_type: str, location: str, vp_label: str,
-                   virtual_link: str, manager_name: str, manager_email: str) -> str:
-    if is_all_day:
-        # For all-day, show date(s) only (remember Graph end is exclusive)
-        if (end_dt_et - timedelta(days=1)).date() == start_dt_et.date():
-            when = start_dt_et.strftime("%B %d, %Y")
-        else:
-            when = f"{start_dt_et.strftime('%B %d, %Y')} – {(end_dt_et - timedelta(days=1)).strftime('%B %d, %Y')}"
-    else:
-        when = f"{start_dt_et.strftime('%B %d, %Y, %I:%M %p')} – {end_dt_et.strftime('%I:%M %p')} {tz_label}"
+    def map_graph_event_to_row_updates(g: dict) -> dict:
+        """
+        Return ONLY the Outlook-owned fields you want to overwrite in 'events'.
+        Internal app fields (deliverables, accreditation, manager, etc.) are untouched.
+        """
+        updates = {}
 
-    parts = [
-        f"<p><b>Event:</b> {subject}</p>",
-        f"<p><b>When:</b> {when}</p>",
-    ]
+        # Subject (optional—enable if you want Outlook title to win)
+        subj = g.get("subject")
+        if subj:
+            updates["subject"] = subj
 
-    if client_value:
-        parts.append(f"<p><b>Client:</b> {client_value}</p>")
-    if event_type == "In-person" and location:
-        parts.append(f"<p><b>Location:</b> {location}</p>")
-    elif event_type == "Virtual":
-        parts.append(f"<p><b>Virtual:</b> {vp_label}{(' – ' + virtual_link) if virtual_link else ''}</p>")
-    if manager_name or manager_email:
-        parts.append(f"<p><b>Meeting Manager:</b> {manager_name} {('<' + manager_email + '>') if manager_email else ''}</p>")
+        # All-day
+        updates["is_all_day"] = bool(g.get("isAllDay"))
 
-    return "\n".join(parts)
+        # Start/End (UTC ISO)
+        start_utc = _parse_graph_dt_to_utc(g.get("start"))
+        end_utc   = _parse_graph_dt_to_utc(g.get("end"))
+        if start_utc: updates["start_dt_utc"] = start_utc
+        if end_utc:   updates["end_dt_utc"] = end_utc
 
+        # Location (only physical display name)
+        loc = (g.get("location") or {}).get("displayName") or ""
+        if loc:
+            updates["location"] = loc
 
-# -----------------------------
-# UI – Create & Edit Tabs
-# -----------------------------
-tab_create, tab_edit, tab_table = st.tabs(["Create", "Edit", "Table"])
+        # Teams/online meeting URL → virtual_link (only fill/refresh the link)
+        om = g.get("onlineMeeting")
+        if isinstance(om, dict):
+            join_url = om.get("joinUrl")
+            if join_url:
+                updates["virtual_link"] = join_url
 
-# ==========
-# CREATE TAB
-# ==========
-with tab_create:
-    st.subheader("Create Event & Post to Master Calendar")
-    
-    if not CAN_CREATE:
-        st.info("You have view-only access for event creation.")
-        st.stop()
-    
-    # -- Persist all-day flag outside the form so conditional fields update immediately
-    if "is_all_day" not in st.session_state:
-        st.session_state["is_all_day"] = False
+        return updates
+          
 
-    event_type = st.selectbox("Event Type", ["In-person", "Virtual"], index=0, key="create_event_type")
-    is_all_day = st.checkbox("All-Day Event", value=st.session_state["is_all_day"], key="create_is_all_day")
-    st.session_state["is_all_day"] = is_all_day
+    # -----------------------------
+    # Formatting helper for emails
+    # -----------------------------
 
-    prev_type = st.session_state.get("prev_event_type_create")
-    if prev_type != event_type:
-        st.session_state["confirm_no_link"] = False
-    st.session_state["prev_event_type_create"] = event_type
-
-    # --- Reminder controls OUTSIDE the form so they re-render live ---
-    rem_col1, rem_col2 = st.columns([1, 2])
-    if "rem_mode" not in st.session_state:
-        st.session_state["rem_mode"] = "Minutes before start (Outlook)"
-
-    st.session_state["rem_mode"] = rem_col1.selectbox(
-        "Reminder Type",
-        ["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"],
-        index=["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"]
-              .index(st.session_state["rem_mode"]),
-        key="create_rem_mode_live",
-    )
-
-    # Live companion input for reminder
-    reminder_minutes = st.session_state.get("reminder_minutes", 30)
-    reminder_days = st.session_state.get("reminder_days", 1)
-    reminder_datetime_local = st.session_state.get("reminder_datetime_local")
-
-    if st.session_state["rem_mode"].startswith("Minutes"):
-        reminder_minutes = rem_col2.number_input(
-            "Minutes before start", min_value=0, max_value=10080, value=int(reminder_minutes), key="create_rem_mins_live"
-        )
-        st.session_state["reminder_minutes"] = reminder_minutes
-
-    elif st.session_state["rem_mode"].startswith("Days"):
-        reminder_days = rem_col2.number_input(
-            "Days before start", min_value=0, max_value=365, value=int(reminder_days), key="create_rem_days_live"
-        )
-        st.session_state["reminder_days"] = reminder_days
-
-    else:
-        default_dt = datetime.combine(date.today(), time(9, 0))
-        reminder_datetime_local = rem_col2.datetime_input(
-            "Reminder date & time", value=reminder_datetime_local or default_dt, key="create_rem_dt_live"
-        )
-        st.session_state["reminder_datetime_local"] = reminder_datetime_local
-
-    # -----------------
-    # Create Event Form
-    # -----------------
-    with st.form("event_form_create"):
-        col1, col2, col3 = st.columns(3)
-        subject = col1.text_input("Event Title *", "", key="create_subject")
-
-        # Client dropdown with Other
-        client_options = load_clients()
-        client_sel = col2.selectbox("Client", client_options + ["Other…"],
-                                    index=(0 if client_options else 0), key="create_client_sel")
-        client_other = ""
-        if client_sel == "Other…":
-            client_other = col2.text_input("Enter new client name", "", key="create_client_other")
-        client_value = client_other if client_sel == "Other…" else (client_sel or "")
-
-        tz_choice = col3.selectbox("Time Zone", list(TZ_MAP.keys()), index=0, key="create_tz")
-
-        # Dates (always in the form)
-        col4, col5 = st.columns(2)
-        start_date = col4.date_input("Start Date", value=date.today(), key="create_start_date")
-        end_date   = col5.date_input("End Date",   value=date.today(), key="create_end_date")
-
-        # Times (only if not all-day) — allow typing with time_input
-        if not is_all_day:
-            start_time = st.time_input("Start Time", value=time(9, 0), key="create_start_time",
-                                       step=timedelta(minutes=5))
-            end_time   = st.time_input("End Time",   value=time(10, 0), key="create_end_time",
-                                       step=timedelta(minutes=5))
-        else:
-            start_time = time(0, 0)
-            end_time   = time(0, 0)
-
-        # Event-type-specific fields
-        location = ""
-        virtual_provider = None
-        virtual_link = None
-        if event_type == "In-person":
-            location = st.text_input("Location (City, Venue, etc.) *", "", key="create_location")
-        else:
-            virtual_provider_label = st.selectbox("Virtual Platform", ["Teams", "Zoom", "Other"],
-                                                  index=0, key="create_vp_label")
-            PROVIDER_MAP = {"Teams": "teams", "Zoom": "zoom", "Other": "other"}
-            virtual_provider = PROVIDER_MAP.get(virtual_provider_label, "other")
-            virtual_link = st.text_input("Virtual Meeting Link (optional)", "", key="create_vlink")
-
-        st.markdown("---")
-        accreditation_required = st.selectbox("CME/Accreditation Required?", ["No", "Yes"],
-                                              index=0, key="create_acc") == "Yes"
-        st.markdown("---")
-
-        # Meeting Manager dropdown with Other
-        st.markdown("**Meeting Manager (internal only):**")
-        managers = load_managers()  # list of (auth_user_id, name, email)
-        manager_labels = [
-            f"{name} <{email}>" if email else name
-            for auth_user_id, name, email in managers
-        ]
-        manager_sel = st.selectbox(
-            "Choose manager",
-            manager_labels + ["Other…"],
-            index=(0 if managers else 0),
-            key="create_mm_sel"
-        )
-
-        manager_name = ""
-        manager_email = ""
-        manager_user_id = None
-
-        if manager_sel == "Other…":
-            mm_col1, mm_col2 = st.columns(2)
-            manager_name = mm_col1.text_input("Name *", "", key="create_mm_name")
-            manager_email = mm_col2.text_input("Email *", "", key="create_mm_email")
-        else:
-            idx = manager_labels.index(manager_sel) if manager_sel in manager_labels else -1
-            if idx >= 0:
-                manager_user_id, manager_name, manager_email = managers[idx]
-
-        # Optional Notes (included in Outlook body)
-        notes = st.text_area("Notes (included in Outlook event body)", key="create_notes")
-
-        # Confirmation for blank virtual link
-        if event_type == "Virtual" and (not virtual_link):
-            if not st.session_state.get("confirm_no_link"):
-                st.warning("Virtual link is blank. Click again to confirm creating without a link. "
-                           "We'll remind you every 7 days until a link is added.")
-
-        submitted = st.form_submit_button("Create Event")
-
-    # ----- Create submission handling -----
-    if submitted:
-        if event_type == "Virtual" and (not virtual_link) and not st.session_state.get("confirm_no_link"):
-            st.session_state["confirm_no_link"] = True
-            st.stop()
-
-        errs = []
-        if not subject:
-            errs.append("Event Title is required.")
-        if event_type == "In-person" and not location:
-            errs.append("Location is required for in-person events.")
-        if manager_sel == "Other…" and (not manager_name or not manager_email):
-            errs.append("Meeting Manager name and email are required.")
-        if errs:
-            st.error("\n".join(errs))
-            st.stop()
-
-        # Build start/end in local zone
-        iana = IANA_MAP[tz_choice]
-        tz = ZoneInfo(iana)
+    def fmt_event_info(subject: str, start_dt_et: datetime, end_dt_et: datetime,
+                       is_all_day: bool, tz_label: str, client_value: str,
+                       event_type: str, location: str, vp_label: str,
+                       virtual_link: str, manager_name: str, manager_email: str) -> str:
         if is_all_day:
-            start_dt_local = datetime.combine(start_date, time(0, 0)).replace(tzinfo=tz)
-            end_base = max(end_date, start_date)
-            end_dt_local = datetime.combine(end_base + timedelta(days=1), time(0, 0)).replace(tzinfo=tz)
-        else:
-            start_dt_local = datetime.combine(start_date, start_time).replace(tzinfo=tz)
-            end_dt_local = datetime.combine(end_date, end_time).replace(tzinfo=tz)
-        if not is_all_day and end_dt_local <= start_dt_local:
-            st.error("End date/time must be after the start date/time. Please adjust and resubmit.")
-            st.stop()
-        start_dt_utc = start_dt_local.astimezone(ZoneInfo("UTC"))
-        end_dt_utc = end_dt_local.astimezone(ZoneInfo("UTC"))
-
-        # Persist “Other…” choices
-        if supabase and client_value and client_sel == "Other…":
-            try:
-                supabase.table("clients").insert({"name": client_value}).execute()
-            except Exception:
-                pass
-        if supabase and manager_sel == "Other…" and manager_name and manager_email:
-            try:
-                supabase.table("meeting_managers").insert({"name": manager_name, "email": manager_email}).execute()
-            except Exception:
-                pass
-
-        # --- Minimal Outlook body: Client + Accreditation + Manager (11pt) ---
-        import html  # at top of file if not already
-
-        # Line 1: Client (optional)
-        client_line = f"<p><b>Client:</b> {html.escape(client_value)}</p>" if client_value else ""
-
-        # Line 2: Accreditation (always show Yes/No)
-        acc_flag = "Yes" if accreditation_required else "No"
-        acc_line = f"<p><b>Accreditation:</b> {acc_flag}</p>"
-
-        # Line 3: Manager block (robust for Outlook using 1-cell table, 11pt)
-        safe_mgr = html.escape(manager_name or "")
-        manager_block = (
-            "<table role='presentation' style='border-collapse:collapse;border-spacing:0;margin:0;padding:0;'>"
-            "<tr><td style='font-family:Segoe UI, Arial, sans-serif; font-size:11pt; color:#c00000;'>"
-            f"<b>Meeting Manager: {safe_mgr}</b><br><br>"
-            f"<b>[App Outlook Event ID will sync here]</b>"
-            "</td></tr></table>"
-        )
-
-        combined_body = client_line + acc_line + manager_block
-
-
-        # Graph payload + reminder minutes (read from session)
-        tz_windows = TZ_MAP[tz_choice]
-        set_teams = (event_type == "Virtual" and virtual_provider == "teams")
-        location_str = location if event_type == "In-person" else (virtual_link if virtual_provider == "zoom" else None)
-
-        rem_mode = st.session_state["rem_mode"]
-        if rem_mode.startswith("Minutes"):
-            rem_minutes_for_graph = int(st.session_state.get("reminder_minutes", 30))
-        elif rem_mode.startswith("Days"):
-            rem_minutes_for_graph = int(st.session_state.get("reminder_days", 1)) * 1440
-        else:
-            rem_minutes_for_graph = 0  # date-certain handled via notifications below
-
-        rem_minutes_for_graph = max(0, min(rem_minutes_for_graph, 525600))  # <= 365 days
-
-        payload = build_graph_event_payload(
-            subject=subject,
-            body_html=combined_body,   # IMPORTANT: send styled body on create
-            tz_windows=tz_windows,
-            start_dt=start_dt_local if not is_all_day else start_date,
-            end_dt=end_dt_local if not is_all_day else end_date,
-            is_all_day=is_all_day,
-            location_str=location_str,
-            set_teams=set_teams,
-            reminder_minutes=rem_minutes_for_graph
-        )
-
-        # ---- Create in Outlook (styled body) + PATCH placeholder -> real ID ----
-        outlook_event_id = None
-        patched_body_for_db = combined_body  # default; replaced if PATCH succeeds
-        created_ok = False
-
-        try:
-            token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
-            created = graph_create_event(token, GRAPH["shared_mailbox_upn"], payload)
-            outlook_event_id = (created or {}).get("id")
-            created_ok = bool(outlook_event_id)
-
-            if created_ok:
-                patch_url = f"https://graph.microsoft.com/v1.0/users/{GRAPH['shared_mailbox_upn']}/events/{outlook_event_id}"
-                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-                # swap the placeholder with the real ID, preserving the style
-                patched_body_for_db = combined_body.replace(
-                    "[App Outlook Event ID will sync here]",
-                    f"[App Outlook Event ID: {outlook_event_id}]"
-                )
-
-                patch_payload = {"body": {"contentType": "HTML", "content": patched_body_for_db}}
-                patch_resp = requests.patch(patch_url, headers=headers, json=patch_payload, timeout=15)
-                patch_resp.raise_for_status()
-
-        except Exception as e:
-            # Important: don't send any emails if create failed
-            st.error(f"Outlook create failed: {e}")
-
-
-        # ---------- Persist in Supabase ----------
-        inserted_event_id = None
-        try:
-            if supabase is None:
-                raise RuntimeError("Supabase not configured.")
-            row = {
-                "subject": subject,
-                "client": client_value or None,
-                "start_dt_utc": start_dt_utc.isoformat(),
-                "end_dt_utc": end_dt_utc.isoformat(),
-                "timezone_display": iana,
-                "is_all_day": is_all_day,
-                "location": location or None,
-                "event_type": ("virtual" if event_type == "Virtual" else "in_person"),
-                "virtual_provider": (virtual_provider or None),
-                "virtual_link": (virtual_link or None),
-                "meeting_manager_name": manager_name,
-                "meeting_manager_email": manager_email,
-                "meeting_manager_user_id": manager_user_id or None,
-                "reminder_minutes": int(rem_minutes_for_graph),
-                "outlook_event_id": outlook_event_id,
-                "accreditation_required": bool(accreditation_required),
-                "created_at": datetime.utcnow().isoformat(),
-                "outlook_body_html": patched_body_for_db,  # final body we sent to Outlook
-                "created_by": user["id"],  # ✅ store the Supabase auth user UUID
-            }
-            res_insert = supabase.table("events").insert(row).execute()
-            if res_insert.data and len(res_insert.data) > 0:
-                inserted_event_id = res_insert.data[0].get("id")
-
-            # Date-certain reminder notification (email via app)
-            if rem_mode.startswith("On date/time") and st.session_state.get("reminder_datetime_local"):
-                try:
-                    notify_utc = st.session_state["reminder_datetime_local"].replace(
-                        tzinfo=ZoneInfo(IANA_MAP[tz_choice])
-                    ).astimezone(ZoneInfo("UTC"))
-                    supabase.table("notifications").insert({
-                        "event_id": inserted_event_id,
-                        "type": "custom_email",
-                        "notify_at_utc": notify_utc.isoformat(),
-                        "channel": "email",
-                        "payload": {
-                            "to": manager_email,
-                            "subject": f"Reminder: {subject}",
-                            "body": f"Reminder for {subject} ({client_value})"
-                        }
-                    }).execute()
-                except Exception:
-                    pass
-
-            # Missing link 7-day seed
-            if event_type == "Virtual" and not virtual_link:
-                try:
-                    notify_at = datetime.utcnow() + timedelta(days=7)
-                    supabase.table("notifications").insert({
-                        "event_id": inserted_event_id,
-                        "type": "missing_link",
-                        "notify_at_utc": notify_at.isoformat(),
-                        "channel": "email",
-                    }).execute()
-                except Exception:
-                    pass
-
-        except Exception as e:
-            st.error(f"Supabase insert failed: {e}")
-        else:
-            st.success("Event created and saved successfully.")
-
-            # ✅ Only send emails if Outlook event was created successfully
-            if created_ok:
-                # Optional manager email
-                if manager_email:
-                    ok_mgr, info_mgr = send_email(
-                        [manager_email],
-                        f"You are the Meeting Manager for '{subject}'",
-                        f"<p>Hello {manager_name},</p><p>You have been added as the Meeting Manager for <b>{subject}</b>.</p>"
-                    )
-                    if ok_mgr:
-                        st.info("Notification email sent to Meeting Manager.")
-
-                # Accreditation email
-                if accreditation_required:
-                    start_et = start_dt_utc.astimezone(ZoneInfo("America/New_York"))
-                    end_et = end_dt_utc.astimezone(ZoneInfo("America/New_York"))
-                    vp_label = {"teams": "Teams", "zoom": "Zoom", "other": "Virtual"}.get(virtual_provider, "Virtual")
-                    info_html = fmt_event_info(
-                        subject, start_et, end_et, is_all_day, tz_choice, client_value,
-                        event_type, location, vp_label, virtual_link, manager_name, manager_email
-                    )
-                    ok_acc, info_acc = send_email(
-                        to_addrs=["mkomenko@lutinemanagement.com"],
-                        cc_addrs=["tbarrett@lutinemanagement.com"],
-                        subject="Accreditation Request",
-                        html_body=("<p>An event has been created that requires accreditation.</p>" + info_html)
-                    )
-                    if ok_acc:
-                        st.info("Accreditation request email sent.")
+            # For all-day, show date(s) only (remember Graph end is exclusive)
+            if (end_dt_et - timedelta(days=1)).date() == start_dt_et.date():
+                when = start_dt_et.strftime("%B %d, %Y")
             else:
-                st.info("Saved to the app, but skipped emails because Outlook wasn’t created.")
+                when = f"{start_dt_et.strftime('%B %d, %Y')} – {(end_dt_et - timedelta(days=1)).strftime('%B %d, %Y')}"
+        else:
+            when = f"{start_dt_et.strftime('%B %d, %Y, %I:%M %p')} – {end_dt_et.strftime('%I:%M %p')} {tz_label}"
+
+        parts = [
+            f"<p><b>Event:</b> {subject}</p>",
+            f"<p><b>When:</b> {when}</p>",
+        ]
+
+        if client_value:
+            parts.append(f"<p><b>Client:</b> {client_value}</p>")
+        if event_type == "In-person" and location:
+            parts.append(f"<p><b>Location:</b> {location}</p>")
+        elif event_type == "Virtual":
+            parts.append(f"<p><b>Virtual:</b> {vp_label}{(' – ' + virtual_link) if virtual_link else ''}</p>")
+        if manager_name or manager_email:
+            parts.append(f"<p><b>Meeting Manager:</b> {manager_name} {('<' + manager_email + '>') if manager_email else ''}</p>")
+
+        return "\n".join(parts)
 
 
+    # -----------------------------
+    # UI – Create & Edit Tabs
+    # -----------------------------
+    tab_create, tab_edit, tab_table = st.tabs(["Create", "Edit", "Table"])
 
+    # ==========
+    # CREATE TAB
+    # ==========
+    with tab_create:
+        st.subheader("Create Event & Post to Master Calendar")
+        
+        if not CAN_CREATE:
+            st.info("You have view-only access for event creation.")
+            st.stop()
+        
+        # -- Persist all-day flag outside the form so conditional fields update immediately
+        if "is_all_day" not in st.session_state:
+            st.session_state["is_all_day"] = False
 
+        event_type = st.selectbox("Event Type", ["In-person", "Virtual"], index=0, key="create_event_type")
+        is_all_day = st.checkbox("All-Day Event", value=st.session_state["is_all_day"], key="create_is_all_day")
+        st.session_state["is_all_day"] = is_all_day
 
-# ========
-# EDIT TAB
-# ========
-def update_outlook_event(token: str, upn: str, event_id: str, payload: dict):
-    url = f"https://graph.microsoft.com/v1.0/users/{upn}/events/{event_id}"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    r = requests.patch(url, headers=headers, json=payload, timeout=20)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Graph PATCH {r.status_code}: {r.text}")
-    return r.json()
+        prev_type = st.session_state.get("prev_event_type_create")
+        if prev_type != event_type:
+            st.session_state["confirm_no_link"] = False
+        st.session_state["prev_event_type_create"] = event_type
 
-def upsert_custom_reminder(supabase_client: Client, event_id: str, notify_at_utc: str, to_email: str, subject_line: str, body_html: str):
-    existing = supabase_client.table("notifications").select("id").eq("event_id", event_id).eq("type", "custom_email").execute()
-    payload = {"to": to_email, "subject": subject_line, "body": body_html}
-    if existing.data:
-        nid = existing.data[0]["id"]
-        supabase_client.table("notifications").update({"notify_at_utc": notify_at_utc, "payload": payload}).eq("id", nid).execute()
-    else:
-        supabase_client.table("notifications").insert({
-            "event_id": event_id, "type": "custom_email", "channel": "email",
-            "notify_at_utc": notify_at_utc, "payload": payload
-        }).execute()
+        # --- Reminder controls OUTSIDE the form so they re-render live ---
+        rem_col1, rem_col2 = st.columns([1, 2])
+        if "rem_mode" not in st.session_state:
+            st.session_state["rem_mode"] = "Minutes before start (Outlook)"
 
-def delete_missing_link_reminders(supabase_client: Client, event_id: str):
-    supabase_client.table("notifications").delete().eq("event_id", event_id).eq("type", "missing_link").execute()
+        st.session_state["rem_mode"] = rem_col1.selectbox(
+            "Reminder Type",
+            ["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"],
+            index=["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"]
+                  .index(st.session_state["rem_mode"]),
+            key="create_rem_mode_live",
+        )
 
-with tab_edit:
-    st.subheader("Edit Existing Event")
+        # Live companion input for reminder
+        reminder_minutes = st.session_state.get("reminder_minutes", 30)
+        reminder_days = st.session_state.get("reminder_days", 1)
+        reminder_datetime_local = st.session_state.get("reminder_datetime_local")
 
-    # Filters
-    filt_cols = st.columns([2,2,2,2])
-    f_start = filt_cols[0].date_input("From", value=date.today().replace(day=1), key="edit_from")
-    f_end   = filt_cols[1].date_input("To", value=date.today() + timedelta(days=30), key="edit_to")
-    clients = load_clients()
-    f_client = filt_cols[2].selectbox("Client filter (optional)", ["(all)"] + clients, index=0, key="edit_client")
+        if st.session_state["rem_mode"].startswith("Minutes"):
+            reminder_minutes = rem_col2.number_input(
+                "Minutes before start", min_value=0, max_value=10080, value=int(reminder_minutes), key="create_rem_mins_live"
+            )
+            st.session_state["reminder_minutes"] = reminder_minutes
 
-    # Load events
-    edit_events = []
-    if supabase is None:
-        st.info("Supabase not configured.")
-    else:
-        try:
-            q = (
-                supabase.table("events")
-                .select("*")
-                .gte("start_dt_utc", datetime.combine(f_start, time(0, 0)).isoformat())
-                .lte("start_dt_utc", datetime.combine(f_end, time(23, 59)).isoformat())
-                .order("start_dt_utc", desc=False)
+        elif st.session_state["rem_mode"].startswith("Days"):
+            reminder_days = rem_col2.number_input(
+                "Days before start", min_value=0, max_value=365, value=int(reminder_days), key="create_rem_days_live"
+            )
+            st.session_state["reminder_days"] = reminder_days
+
+        else:
+            default_dt = datetime.combine(date.today(), time(9, 0))
+            reminder_datetime_local = rem_col2.datetime_input(
+                "Reminder date & time", value=reminder_datetime_local or default_dt, key="create_rem_dt_live"
+            )
+            st.session_state["reminder_datetime_local"] = reminder_datetime_local
+
+        # -----------------
+        # Create Event Form
+        # -----------------
+        with st.form("event_form_create"):
+            col1, col2, col3 = st.columns(3)
+            subject = col1.text_input("Event Title *", "", key="create_subject")
+
+            # Client dropdown with Other
+            client_options = load_clients()
+            client_sel = col2.selectbox("Client", client_options + ["Other…"],
+                                        index=(0 if client_options else 0), key="create_client_sel")
+            client_other = ""
+            if client_sel == "Other…":
+                client_other = col2.text_input("Enter new client name", "", key="create_client_other")
+            client_value = client_other if client_sel == "Other…" else (client_sel or "")
+
+            tz_choice = col3.selectbox("Time Zone", list(TZ_MAP.keys()), index=0, key="create_tz")
+
+            # Dates (always in the form)
+            col4, col5 = st.columns(2)
+            start_date = col4.date_input("Start Date", value=date.today(), key="create_start_date")
+            end_date   = col5.date_input("End Date",   value=date.today(), key="create_end_date")
+
+            # Times (only if not all-day) — allow typing with time_input
+            if not is_all_day:
+                start_time = st.time_input("Start Time", value=time(9, 0), key="create_start_time",
+                                           step=timedelta(minutes=5))
+                end_time   = st.time_input("End Time",   value=time(10, 0), key="create_end_time",
+                                           step=timedelta(minutes=5))
+            else:
+                start_time = time(0, 0)
+                end_time   = time(0, 0)
+
+            # Event-type-specific fields
+            location = ""
+            virtual_provider = None
+            virtual_link = None
+            if event_type == "In-person":
+                location = st.text_input("Location (City, Venue, etc.) *", "", key="create_location")
+            else:
+                virtual_provider_label = st.selectbox("Virtual Platform", ["Teams", "Zoom", "Other"],
+                                                      index=0, key="create_vp_label")
+                PROVIDER_MAP = {"Teams": "teams", "Zoom": "zoom", "Other": "other"}
+                virtual_provider = PROVIDER_MAP.get(virtual_provider_label, "other")
+                virtual_link = st.text_input("Virtual Meeting Link (optional)", "", key="create_vlink")
+
+            st.markdown("---")
+            accreditation_required = st.selectbox("CME/Accreditation Required?", ["No", "Yes"],
+                                                  index=0, key="create_acc") == "Yes"
+            st.markdown("---")
+
+            # Meeting Manager dropdown with Other
+            st.markdown("**Meeting Manager (internal only):**")
+            managers = load_managers()  # list of (auth_user_id, name, email)
+            manager_labels = [
+                f"{name} <{email}>" if email else name
+                for auth_user_id, name, email in managers
+            ]
+            manager_sel = st.selectbox(
+                "Choose manager",
+                manager_labels + ["Other…"],
+                index=(0 if managers else 0),
+                key="create_mm_sel"
             )
 
-            if f_client and f_client != "(all)":
-                q = q.eq("client", f_client)
+            manager_name = ""
+            manager_email = ""
+            manager_user_id = None
 
-            if CAN_EDIT_ASSIGNED and not CAN_EDIT_ALL:
-                q = q.eq("meeting_manager_user_id", user["id"])
-            elif not CAN_EDIT_ALL and not CAN_EDIT_ASSIGNED:
-                edit_events = []
+            if manager_sel == "Other…":
+                mm_col1, mm_col2 = st.columns(2)
+                manager_name = mm_col1.text_input("Name *", "", key="create_mm_name")
+                manager_email = mm_col2.text_input("Email *", "", key="create_mm_email")
             else:
-                pass
+                idx = manager_labels.index(manager_sel) if manager_sel in manager_labels else -1
+                if idx >= 0:
+                    manager_user_id, manager_name, manager_email = managers[idx]
 
-            if CAN_EDIT_ALL or CAN_EDIT_ASSIGNED:
-                res = q.execute()
-                edit_events = res.data or []
+            # Optional Notes (included in Outlook body)
+            notes = st.text_area("Notes (included in Outlook event body)", key="create_notes")
 
-        except Exception as e:
-            st.error(f"Failed to load events: {e}")
+            # Confirmation for blank virtual link
+            if event_type == "Virtual" and (not virtual_link):
+                if not st.session_state.get("confirm_no_link"):
+                    st.warning("Virtual link is blank. Click again to confirm creating without a link. "
+                               "We'll remind you every 7 days until a link is added.")
 
-    if not edit_events:
-        if ROLE == "viewer":
-            st.caption("You do not have edit access.")
+            submitted = st.form_submit_button("Create Event")
+
+        # ----- Create submission handling -----
+        if submitted:
+            if event_type == "Virtual" and (not virtual_link) and not st.session_state.get("confirm_no_link"):
+                st.session_state["confirm_no_link"] = True
+                st.stop()
+
+            errs = []
+            if not subject:
+                errs.append("Event Title is required.")
+            if event_type == "In-person" and not location:
+                errs.append("Location is required for in-person events.")
+            if manager_sel == "Other…" and (not manager_name or not manager_email):
+                errs.append("Meeting Manager name and email are required.")
+            if errs:
+                st.error("\n".join(errs))
+                st.stop()
+
+            # Build start/end in local zone
+            iana = IANA_MAP[tz_choice]
+            tz = ZoneInfo(iana)
+            if is_all_day:
+                start_dt_local = datetime.combine(start_date, time(0, 0)).replace(tzinfo=tz)
+                end_base = max(end_date, start_date)
+                end_dt_local = datetime.combine(end_base + timedelta(days=1), time(0, 0)).replace(tzinfo=tz)
+            else:
+                start_dt_local = datetime.combine(start_date, start_time).replace(tzinfo=tz)
+                end_dt_local = datetime.combine(end_date, end_time).replace(tzinfo=tz)
+            if not is_all_day and end_dt_local <= start_dt_local:
+                st.error("End date/time must be after the start date/time. Please adjust and resubmit.")
+                st.stop()
+            start_dt_utc = start_dt_local.astimezone(ZoneInfo("UTC"))
+            end_dt_utc = end_dt_local.astimezone(ZoneInfo("UTC"))
+
+            # Persist “Other…” choices
+            if supabase and client_value and client_sel == "Other…":
+                try:
+                    supabase.table("clients").insert({"name": client_value}).execute()
+                except Exception:
+                    pass
+            if supabase and manager_sel == "Other…" and manager_name and manager_email:
+                try:
+                    supabase.table("meeting_managers").insert({"name": manager_name, "email": manager_email}).execute()
+                except Exception:
+                    pass
+
+            # --- Minimal Outlook body: Client + Accreditation + Manager (11pt) ---
+            import html  # at top of file if not already
+
+            # Line 1: Client (optional)
+            client_line = f"<p><b>Client:</b> {html.escape(client_value)}</p>" if client_value else ""
+
+            # Line 2: Accreditation (always show Yes/No)
+            acc_flag = "Yes" if accreditation_required else "No"
+            acc_line = f"<p><b>Accreditation:</b> {acc_flag}</p>"
+
+            # Line 3: Manager block (robust for Outlook using 1-cell table, 11pt)
+            safe_mgr = html.escape(manager_name or "")
+            manager_block = (
+                "<table role='presentation' style='border-collapse:collapse;border-spacing:0;margin:0;padding:0;'>"
+                "<tr><td style='font-family:Segoe UI, Arial, sans-serif; font-size:11pt; color:#c00000;'>"
+                f"<b>Meeting Manager: {safe_mgr}</b><br><br>"
+                f"<b>[App Outlook Event ID will sync here]</b>"
+                "</td></tr></table>"
+            )
+
+            combined_body = client_line + acc_line + manager_block
+
+
+            # Graph payload + reminder minutes (read from session)
+            tz_windows = TZ_MAP[tz_choice]
+            set_teams = (event_type == "Virtual" and virtual_provider == "teams")
+            location_str = location if event_type == "In-person" else (virtual_link if virtual_provider == "zoom" else None)
+
+            rem_mode = st.session_state["rem_mode"]
+            if rem_mode.startswith("Minutes"):
+                rem_minutes_for_graph = int(st.session_state.get("reminder_minutes", 30))
+            elif rem_mode.startswith("Days"):
+                rem_minutes_for_graph = int(st.session_state.get("reminder_days", 1)) * 1440
+            else:
+                rem_minutes_for_graph = 0  # date-certain handled via notifications below
+
+            rem_minutes_for_graph = max(0, min(rem_minutes_for_graph, 525600))  # <= 365 days
+
+            payload = build_graph_event_payload(
+                subject=subject,
+                body_html=combined_body,   # IMPORTANT: send styled body on create
+                tz_windows=tz_windows,
+                start_dt=start_dt_local if not is_all_day else start_date,
+                end_dt=end_dt_local if not is_all_day else end_date,
+                is_all_day=is_all_day,
+                location_str=location_str,
+                set_teams=set_teams,
+                reminder_minutes=rem_minutes_for_graph
+            )
+
+            # ---- Create in Outlook (styled body) + PATCH placeholder -> real ID ----
+            outlook_event_id = None
+            patched_body_for_db = combined_body  # default; replaced if PATCH succeeds
+            created_ok = False
+
+            try:
+                token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+                created = graph_create_event(token, GRAPH["shared_mailbox_upn"], payload)
+                outlook_event_id = (created or {}).get("id")
+                created_ok = bool(outlook_event_id)
+
+                if created_ok:
+                    patch_url = f"https://graph.microsoft.com/v1.0/users/{GRAPH['shared_mailbox_upn']}/events/{outlook_event_id}"
+                    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+                    # swap the placeholder with the real ID, preserving the style
+                    patched_body_for_db = combined_body.replace(
+                        "[App Outlook Event ID will sync here]",
+                        f"[App Outlook Event ID: {outlook_event_id}]"
+                    )
+
+                    patch_payload = {"body": {"contentType": "HTML", "content": patched_body_for_db}}
+                    patch_resp = requests.patch(patch_url, headers=headers, json=patch_payload, timeout=15)
+                    patch_resp.raise_for_status()
+
+            except Exception as e:
+                # Important: don't send any emails if create failed
+                st.error(f"Outlook create failed: {e}")
+
+
+            # ---------- Persist in Supabase ----------
+            inserted_event_id = None
+            try:
+                if supabase is None:
+                    raise RuntimeError("Supabase not configured.")
+                row = {
+                    "subject": subject,
+                    "client": client_value or None,
+                    "start_dt_utc": start_dt_utc.isoformat(),
+                    "end_dt_utc": end_dt_utc.isoformat(),
+                    "timezone_display": iana,
+                    "is_all_day": is_all_day,
+                    "location": location or None,
+                    "event_type": ("virtual" if event_type == "Virtual" else "in_person"),
+                    "virtual_provider": (virtual_provider or None),
+                    "virtual_link": (virtual_link or None),
+                    "meeting_manager_name": manager_name,
+                    "meeting_manager_email": manager_email,
+                    "meeting_manager_user_id": manager_user_id or None,
+                    "reminder_minutes": int(rem_minutes_for_graph),
+                    "outlook_event_id": outlook_event_id,
+                    "accreditation_required": bool(accreditation_required),
+                    "created_at": datetime.utcnow().isoformat(),
+                    "outlook_body_html": patched_body_for_db,  # final body we sent to Outlook
+                    "created_by": user["id"],  # ✅ store the Supabase auth user UUID
+                }
+                res_insert = supabase.table("events").insert(row).execute()
+                if res_insert.data and len(res_insert.data) > 0:
+                    inserted_event_id = res_insert.data[0].get("id")
+
+                # Date-certain reminder notification (email via app)
+                if rem_mode.startswith("On date/time") and st.session_state.get("reminder_datetime_local"):
+                    try:
+                        notify_utc = st.session_state["reminder_datetime_local"].replace(
+                            tzinfo=ZoneInfo(IANA_MAP[tz_choice])
+                        ).astimezone(ZoneInfo("UTC"))
+                        supabase.table("notifications").insert({
+                            "event_id": inserted_event_id,
+                            "type": "custom_email",
+                            "notify_at_utc": notify_utc.isoformat(),
+                            "channel": "email",
+                            "payload": {
+                                "to": manager_email,
+                                "subject": f"Reminder: {subject}",
+                                "body": f"Reminder for {subject} ({client_value})"
+                            }
+                        }).execute()
+                    except Exception:
+                        pass
+
+                # Missing link 7-day seed
+                if event_type == "Virtual" and not virtual_link:
+                    try:
+                        notify_at = datetime.utcnow() + timedelta(days=7)
+                        supabase.table("notifications").insert({
+                            "event_id": inserted_event_id,
+                            "type": "missing_link",
+                            "notify_at_utc": notify_at.isoformat(),
+                            "channel": "email",
+                        }).execute()
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                st.error(f"Supabase insert failed: {e}")
+            else:
+                st.success("Event created and saved successfully.")
+
+                # ✅ Only send emails if Outlook event was created successfully
+                if created_ok:
+                    # Optional manager email
+                    if manager_email:
+                        ok_mgr, info_mgr = send_email(
+                            [manager_email],
+                            f"You are the Meeting Manager for '{subject}'",
+                            f"<p>Hello {manager_name},</p><p>You have been added as the Meeting Manager for <b>{subject}</b>.</p>"
+                        )
+                        if ok_mgr:
+                            st.info("Notification email sent to Meeting Manager.")
+
+                    # Accreditation email
+                    if accreditation_required:
+                        start_et = start_dt_utc.astimezone(ZoneInfo("America/New_York"))
+                        end_et = end_dt_utc.astimezone(ZoneInfo("America/New_York"))
+                        vp_label = {"teams": "Teams", "zoom": "Zoom", "other": "Virtual"}.get(virtual_provider, "Virtual")
+                        info_html = fmt_event_info(
+                            subject, start_et, end_et, is_all_day, tz_choice, client_value,
+                            event_type, location, vp_label, virtual_link, manager_name, manager_email
+                        )
+                        ok_acc, info_acc = send_email(
+                            to_addrs=["mkomenko@lutinemanagement.com"],
+                            cc_addrs=["tbarrett@lutinemanagement.com"],
+                            subject="Accreditation Request",
+                            html_body=("<p>An event has been created that requires accreditation.</p>" + info_html)
+                        )
+                        if ok_acc:
+                            st.info("Accreditation request email sent.")
+                else:
+                    st.info("Saved to the app, but skipped emails because Outlook wasn’t created.")
+
+
+
+
+
+    # ========
+    # EDIT TAB
+    # ========
+    def update_outlook_event(token: str, upn: str, event_id: str, payload: dict):
+        url = f"https://graph.microsoft.com/v1.0/users/{upn}/events/{event_id}"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        r = requests.patch(url, headers=headers, json=payload, timeout=20)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Graph PATCH {r.status_code}: {r.text}")
+        return r.json()
+
+    def upsert_custom_reminder(supabase_client: Client, event_id: str, notify_at_utc: str, to_email: str, subject_line: str, body_html: str):
+        existing = supabase_client.table("notifications").select("id").eq("event_id", event_id).eq("type", "custom_email").execute()
+        payload = {"to": to_email, "subject": subject_line, "body": body_html}
+        if existing.data:
+            nid = existing.data[0]["id"]
+            supabase_client.table("notifications").update({"notify_at_utc": notify_at_utc, "payload": payload}).eq("id", nid).execute()
         else:
-            st.caption("No events found for the selected filters.")
-        st.stop()
+            supabase_client.table("notifications").insert({
+                "event_id": event_id, "type": "custom_email", "channel": "email",
+                "notify_at_utc": notify_at_utc, "payload": payload
+            }).execute()
 
-    # Select event to edit
-    options = [f"{ev['subject']} • {ev.get('client') or ''} • {ev['start_dt_utc'][:16]}" for ev in edit_events]
-    sel_idx = st.selectbox("Pick an event to edit", list(range(len(options))), format_func=lambda i: options[i], key="edit_pick")
-    ev = edit_events[sel_idx]
-    # --- Seed session_state from the selected event (only when selection changes) ---
-    selected_id = ev["id"]
-    prev_selected = st.session_state.get("edit_selected_id")
-    if prev_selected != selected_id:
-        st.session_state["edit_selected_id"] = selected_id
+    def delete_missing_link_reminders(supabase_client: Client, event_id: str):
+        supabase_client.table("notifications").delete().eq("event_id", event_id).eq("type", "missing_link").execute()
 
-        # Convert stored UTC to the event's local tz for seeding
+    with tab_edit:
+        st.subheader("Edit Existing Event")
+
+        # Filters
+        filt_cols = st.columns([2,2,2,2])
+        f_start = filt_cols[0].date_input("From", value=date.today().replace(day=1), key="edit_from")
+        f_end   = filt_cols[1].date_input("To", value=date.today() + timedelta(days=30), key="edit_to")
+        clients = load_clients()
+        f_client = filt_cols[2].selectbox("Client filter (optional)", ["(all)"] + clients, index=0, key="edit_client")
+
+        # Load events
+        edit_events = []
+        if supabase is None:
+            st.info("Supabase not configured.")
+        else:
+            try:
+                q = (
+                    supabase.table("events")
+                    .select("*")
+                    .gte("start_dt_utc", datetime.combine(f_start, time(0, 0)).isoformat())
+                    .lte("start_dt_utc", datetime.combine(f_end, time(23, 59)).isoformat())
+                    .order("start_dt_utc", desc=False)
+                )
+
+                if f_client and f_client != "(all)":
+                    q = q.eq("client", f_client)
+
+                if CAN_EDIT_ASSIGNED and not CAN_EDIT_ALL:
+                    q = q.eq("meeting_manager_user_id", user["id"])
+                elif not CAN_EDIT_ALL and not CAN_EDIT_ASSIGNED:
+                    edit_events = []
+                else:
+                    pass
+
+                if CAN_EDIT_ALL or CAN_EDIT_ASSIGNED:
+                    res = q.execute()
+                    edit_events = res.data or []
+
+            except Exception as e:
+                st.error(f"Failed to load events: {e}")
+
+        if not edit_events:
+            if ROLE == "viewer":
+                st.caption("You do not have edit access.")
+            else:
+                st.caption("No events found for the selected filters.")
+            st.stop()
+
+        # Select event to edit
+        options = [f"{ev['subject']} • {ev.get('client') or ''} • {ev['start_dt_utc'][:16]}" for ev in edit_events]
+        sel_idx = st.selectbox("Pick an event to edit", list(range(len(options))), format_func=lambda i: options[i], key="edit_pick")
+        ev = edit_events[sel_idx]
+        # --- Seed session_state from the selected event (only when selection changes) ---
+        selected_id = ev["id"]
+        prev_selected = st.session_state.get("edit_selected_id")
+        if prev_selected != selected_id:
+            st.session_state["edit_selected_id"] = selected_id
+
+            # Convert stored UTC to the event's local tz for seeding
+            iana_e = ev.get("timezone_display") or "America/New_York"
+            tz_e = ZoneInfo(iana_e)
+            start_e_utc = datetime.fromisoformat(ev["start_dt_utc"].replace("Z", "+00:00"))
+            end_e_utc   = datetime.fromisoformat(ev["end_dt_utc"].replace("Z", "+00:00"))
+            start_e = start_e_utc.astimezone(tz_e)
+            end_e   = end_e_utc.astimezone(tz_e)
+
+            # Find the matching Windows tz key you use in the UI (reverse IANA->label)
+            # This assumes you have IANA_MAP and TZ_MAP (Windows label -> Windows name) already.
+            # If you have a map from tz label -> IANA in IANA_MAP, reverse it:
+            tz_label_from_iana = next((label for label, iana in IANA_MAP.items() if iana == iana_e), list(TZ_MAP.keys())[0])
+            st.session_state["edit_tz_choice"] = tz_label_from_iana
+
+            st.session_state["edit_is_all_day"] = bool(ev.get("is_all_day"))
+
+            # Seed dates/times
+            st.session_state["edit_start_date"] = start_e.date()
+            st.session_state["edit_end_date"]   = (end_e - timedelta(days=1)).date() if ev.get("is_all_day") else end_e.date()
+            st.session_state["edit_start_time"] = start_e.time().replace(second=0, microsecond=0)
+            st.session_state["edit_end_time"]   = (time(0,0) if ev.get("is_all_day") else end_e.time().replace(second=0, microsecond=0))
+
+            # Seed reminder widgets sensibly
+            mins = int(ev.get("reminder_minutes") or 0)
+            if mins >= 1440:
+                st.session_state["edit_rem_mode"] = "Days before start (Outlook)"
+                st.session_state["edit_reminder_days"] = max(1, mins // 1440)
+            elif mins > 0:
+                st.session_state["edit_rem_mode"] = "Minutes before start (Outlook)"
+                st.session_state["edit_reminder_minutes"] = mins
+            else:
+                st.session_state["edit_rem_mode"] = "On date/time (Email via app)"
+                st.session_state["edit_reminder_datetime_local"] = datetime.combine(date.today(), time(9,0))
+        
+            if CAN_DELETE:
+                st.markdown("---")
+                st.markdown("### Danger Zone")
+                c1, c2 = st.columns([1, 3])
+                confirm_del = c1.checkbox("Yes, delete this event", key="confirm_delete_ev")
+                if c2.button("Delete Event", type="secondary", disabled=not confirm_del):
+                    try:
+                        # 1) Delete from Outlook first (if present)
+                        if ev.get("outlook_event_id") and not missing:
+                            tok = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+                            try:
+                                graph_delete_event(tok, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"])
+                            except Exception as e:
+                                # Don’t block DB cleanup if Outlook delete had a hiccup
+                                st.warning(f"Outlook delete issue (continuing): {e}")
+
+                        # 2) Delete from Supabase; notifications will cascade via FK
+                        supabase.table("events").delete().eq("id", ev["id"]).execute()
+
+                        st.success("Event deleted.")
+                        st.stop()  # stop to refresh UI cleanly
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
+          
+        # Prefill fields
+        subject_e = st.text_input("Event Title *", ev.get("subject") or "", key="edit_subject")
+        tz_label_e = "Eastern"  # default for display; use stored timezone_display to infer
         iana_e = ev.get("timezone_display") or "America/New_York"
         tz_e = ZoneInfo(iana_e)
+
+        # Derive local datetimes from UTC
         start_e_utc = datetime.fromisoformat(ev["start_dt_utc"].replace("Z", "+00:00"))
         end_e_utc   = datetime.fromisoformat(ev["end_dt_utc"].replace("Z", "+00:00"))
         start_e = start_e_utc.astimezone(tz_e)
         end_e   = end_e_utc.astimezone(tz_e)
+        is_all_day_e = bool(ev.get("is_all_day"))
 
-        # Find the matching Windows tz key you use in the UI (reverse IANA->label)
-        # This assumes you have IANA_MAP and TZ_MAP (Windows label -> Windows name) already.
-        # If you have a map from tz label -> IANA in IANA_MAP, reverse it:
-        tz_label_from_iana = next((label for label, iana in IANA_MAP.items() if iana == iana_e), list(TZ_MAP.keys())[0])
-        st.session_state["edit_tz_choice"] = tz_label_from_iana
+        # Top controls
+        top_cols = st.columns(3)
+        tz_choice_e = top_cols[0].selectbox(
+            "Time Zone",
+            list(TZ_MAP.keys()),
+            index=list(TZ_MAP.keys()).index(st.session_state["edit_tz_choice"]),
+            key="edit_tz_choice"
+        )
+        is_all_day_e = top_cols[1].checkbox("All-Day Event", key="edit_is_all_day")
 
-        st.session_state["edit_is_all_day"] = bool(ev.get("is_all_day"))
+        # Dates
+        colD1, colD2 = st.columns(2)
+        start_date_e = colD1.date_input("Start Date", key="edit_start_date")
+        end_date_e   = colD2.date_input("End Date",   key="edit_end_date")
 
-        # Seed dates/times
-        st.session_state["edit_start_date"] = start_e.date()
-        st.session_state["edit_end_date"]   = (end_e - timedelta(days=1)).date() if ev.get("is_all_day") else end_e.date()
-        st.session_state["edit_start_time"] = start_e.time().replace(second=0, microsecond=0)
-        st.session_state["edit_end_time"]   = (time(0,0) if ev.get("is_all_day") else end_e.time().replace(second=0, microsecond=0))
-
-        # Seed reminder widgets sensibly
-        mins = int(ev.get("reminder_minutes") or 0)
-        if mins >= 1440:
-            st.session_state["edit_rem_mode"] = "Days before start (Outlook)"
-            st.session_state["edit_reminder_days"] = max(1, mins // 1440)
-        elif mins > 0:
-            st.session_state["edit_rem_mode"] = "Minutes before start (Outlook)"
-            st.session_state["edit_reminder_minutes"] = mins
+        # Times (typing allowed, not dropdown-only)
+        if not is_all_day_e:
+            start_time_e = st.time_input("Start Time", key="edit_start_time", step=timedelta(minutes=5))
+            end_time_e   = st.time_input("End Time",   key="edit_end_time",   step=timedelta(minutes=5))
         else:
-            st.session_state["edit_rem_mode"] = "On date/time (Email via app)"
+            start_time_e = time(0, 0)
+            end_time_e   = time(0, 0)
+
+        # Event type & location/virtual
+        event_type_e = st.selectbox("Event Type", ["In-person", "Virtual"], index=(0 if ev.get("event_type") == "in_person" else 1), key="edit_event_type")
+        location_e = ""
+        virtual_provider_e = None
+        virtual_link_e = None
+        if event_type_e == "In-person":
+            location_e = st.text_input("Location (City, Venue, etc.) *", ev.get("location") or "", key="edit_location")
+        else:
+            default_vp = {"teams": "Teams", "zoom": "Zoom"}.get((ev.get("virtual_provider") or "other").lower(), "Other")
+            vp_label_e = st.selectbox("Virtual Platform", ["Teams", "Zoom", "Other"], index=["Teams","Zoom","Other"].index(default_vp), key="edit_vp_label")
+            PROVIDER_MAP = {"Teams": "teams", "Zoom": "zoom", "Other": "other"}
+            virtual_provider_e = PROVIDER_MAP.get(vp_label_e, "other")
+            virtual_link_e = st.text_input("Virtual Meeting Link (optional)", ev.get("virtual_link") or "", key="edit_vlink")
+
+        # Manager & accreditation
+        st.markdown("---")
+        accreditation_required_e = st.selectbox("CME/Accreditation Required?", ["No", "Yes"], index=(1 if ev.get("accreditation_required") else 0), key="edit_acc") == "Yes"
+        st.markdown("---")
+        managers_e = load_managers()
+        manager_labels_e = [
+            f"{name} <{email}>" if email else name
+            for auth_user_id, name, email in managers_e
+        ]
+
+        default_label = f"{ev.get('meeting_manager_name') or ''} <{ev.get('meeting_manager_email') or ''}>".strip()
+        try_idx = manager_labels_e.index(default_label) if default_label in manager_labels_e else 0
+
+        manager_sel_e = st.selectbox(
+            "Choose manager",
+            manager_labels_e + ["Other…"],
+            index=(try_idx if manager_labels_e else 0),
+            key="edit_mm_sel"
+        )
+
+        manager_name_e = ev.get("meeting_manager_name") or ""
+        manager_email_e = ev.get("meeting_manager_email") or ""
+        manager_user_id_e = ev.get("meeting_manager_user_id")
+
+        if manager_sel_e == "Other…":
+            mm2c1, mm2c2 = st.columns(2)
+            manager_name_e = mm2c1.text_input("Name *", manager_name_e, key="edit_mm_name")
+            manager_email_e = mm2c2.text_input("Email *", manager_email_e, key="edit_mm_email")
+            manager_user_id_e = None
+        else:
+            idx2 = manager_labels_e.index(manager_sel_e) if manager_sel_e in manager_labels_e else -1
+            if idx2 >= 0:
+                manager_user_id_e, manager_name_e, manager_email_e = managers_e[idx2]
+
+        # Reminder modes (edit)
+        rem2c1, rem2c2 = st.columns([1, 2])
+
+        # Initialize once from stored minutes
+        if "edit_rem_mode" not in st.session_state:
+            stored_mins = int(ev.get("reminder_minutes") or 0)
+            st.session_state["edit_rem_mode"] = (
+                "Minutes before start (Outlook)" if stored_mins and stored_mins < 1440 else
+                ("Days before start (Outlook)" if stored_mins >= 1440 else "On date/time (Email via app)")
+            )
+        if "edit_reminder_minutes" not in st.session_state:
+            st.session_state["edit_reminder_minutes"] = int(ev.get("reminder_minutes") or 30)
+        if "edit_reminder_days" not in st.session_state:
+            base = int(ev.get("reminder_minutes") or 0)
+            st.session_state["edit_reminder_days"] = max(1, base // 1440) if base >= 1440 else 1
+        if "edit_reminder_datetime_local" not in st.session_state:
             st.session_state["edit_reminder_datetime_local"] = datetime.combine(date.today(), time(9,0))
-    
-        if CAN_DELETE:
-            st.markdown("---")
-            st.markdown("### Danger Zone")
-            c1, c2 = st.columns([1, 3])
-            confirm_del = c1.checkbox("Yes, delete this event", key="confirm_delete_ev")
-            if c2.button("Delete Event", type="secondary", disabled=not confirm_del):
-                try:
-                    # 1) Delete from Outlook first (if present)
-                    if ev.get("outlook_event_id") and not missing:
-                        tok = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
-                        try:
-                            graph_delete_event(tok, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"])
-                        except Exception as e:
-                            # Don’t block DB cleanup if Outlook delete had a hiccup
-                            st.warning(f"Outlook delete issue (continuing): {e}")
 
-                    # 2) Delete from Supabase; notifications will cascade via FK
-                    supabase.table("events").delete().eq("id", ev["id"]).execute()
-
-                    st.success("Event deleted.")
-                    st.stop()  # stop to refresh UI cleanly
-                except Exception as e:
-                    st.error(f"Delete failed: {e}")
-      
-    # Prefill fields
-    subject_e = st.text_input("Event Title *", ev.get("subject") or "", key="edit_subject")
-    tz_label_e = "Eastern"  # default for display; use stored timezone_display to infer
-    iana_e = ev.get("timezone_display") or "America/New_York"
-    tz_e = ZoneInfo(iana_e)
-
-    # Derive local datetimes from UTC
-    start_e_utc = datetime.fromisoformat(ev["start_dt_utc"].replace("Z", "+00:00"))
-    end_e_utc   = datetime.fromisoformat(ev["end_dt_utc"].replace("Z", "+00:00"))
-    start_e = start_e_utc.astimezone(tz_e)
-    end_e   = end_e_utc.astimezone(tz_e)
-    is_all_day_e = bool(ev.get("is_all_day"))
-
-    # Top controls
-    top_cols = st.columns(3)
-    tz_choice_e = top_cols[0].selectbox(
-        "Time Zone",
-        list(TZ_MAP.keys()),
-        index=list(TZ_MAP.keys()).index(st.session_state["edit_tz_choice"]),
-        key="edit_tz_choice"
-    )
-    is_all_day_e = top_cols[1].checkbox("All-Day Event", key="edit_is_all_day")
-
-    # Dates
-    colD1, colD2 = st.columns(2)
-    start_date_e = colD1.date_input("Start Date", key="edit_start_date")
-    end_date_e   = colD2.date_input("End Date",   key="edit_end_date")
-
-    # Times (typing allowed, not dropdown-only)
-    if not is_all_day_e:
-        start_time_e = st.time_input("Start Time", key="edit_start_time", step=timedelta(minutes=5))
-        end_time_e   = st.time_input("End Time",   key="edit_end_time",   step=timedelta(minutes=5))
-    else:
-        start_time_e = time(0, 0)
-        end_time_e   = time(0, 0)
-
-    # Event type & location/virtual
-    event_type_e = st.selectbox("Event Type", ["In-person", "Virtual"], index=(0 if ev.get("event_type") == "in_person" else 1), key="edit_event_type")
-    location_e = ""
-    virtual_provider_e = None
-    virtual_link_e = None
-    if event_type_e == "In-person":
-        location_e = st.text_input("Location (City, Venue, etc.) *", ev.get("location") or "", key="edit_location")
-    else:
-        default_vp = {"teams": "Teams", "zoom": "Zoom"}.get((ev.get("virtual_provider") or "other").lower(), "Other")
-        vp_label_e = st.selectbox("Virtual Platform", ["Teams", "Zoom", "Other"], index=["Teams","Zoom","Other"].index(default_vp), key="edit_vp_label")
-        PROVIDER_MAP = {"Teams": "teams", "Zoom": "zoom", "Other": "other"}
-        virtual_provider_e = PROVIDER_MAP.get(vp_label_e, "other")
-        virtual_link_e = st.text_input("Virtual Meeting Link (optional)", ev.get("virtual_link") or "", key="edit_vlink")
-
-    # Manager & accreditation
-    st.markdown("---")
-    accreditation_required_e = st.selectbox("CME/Accreditation Required?", ["No", "Yes"], index=(1 if ev.get("accreditation_required") else 0), key="edit_acc") == "Yes"
-    st.markdown("---")
-    managers_e = load_managers()
-    manager_labels_e = [
-        f"{name} <{email}>" if email else name
-        for auth_user_id, name, email in managers_e
-    ]
-
-    default_label = f"{ev.get('meeting_manager_name') or ''} <{ev.get('meeting_manager_email') or ''}>".strip()
-    try_idx = manager_labels_e.index(default_label) if default_label in manager_labels_e else 0
-
-    manager_sel_e = st.selectbox(
-        "Choose manager",
-        manager_labels_e + ["Other…"],
-        index=(try_idx if manager_labels_e else 0),
-        key="edit_mm_sel"
-    )
-
-    manager_name_e = ev.get("meeting_manager_name") or ""
-    manager_email_e = ev.get("meeting_manager_email") or ""
-    manager_user_id_e = ev.get("meeting_manager_user_id")
-
-    if manager_sel_e == "Other…":
-        mm2c1, mm2c2 = st.columns(2)
-        manager_name_e = mm2c1.text_input("Name *", manager_name_e, key="edit_mm_name")
-        manager_email_e = mm2c2.text_input("Email *", manager_email_e, key="edit_mm_email")
-        manager_user_id_e = None
-    else:
-        idx2 = manager_labels_e.index(manager_sel_e) if manager_sel_e in manager_labels_e else -1
-        if idx2 >= 0:
-            manager_user_id_e, manager_name_e, manager_email_e = managers_e[idx2]
-
-    # Reminder modes (edit)
-    rem2c1, rem2c2 = st.columns([1, 2])
-
-    # Initialize once from stored minutes
-    if "edit_rem_mode" not in st.session_state:
-        stored_mins = int(ev.get("reminder_minutes") or 0)
-        st.session_state["edit_rem_mode"] = (
-            "Minutes before start (Outlook)" if stored_mins and stored_mins < 1440 else
-            ("Days before start (Outlook)" if stored_mins >= 1440 else "On date/time (Email via app)")
-        )
-    if "edit_reminder_minutes" not in st.session_state:
-        st.session_state["edit_reminder_minutes"] = int(ev.get("reminder_minutes") or 30)
-    if "edit_reminder_days" not in st.session_state:
-        base = int(ev.get("reminder_minutes") or 0)
-        st.session_state["edit_reminder_days"] = max(1, base // 1440) if base >= 1440 else 1
-    if "edit_reminder_datetime_local" not in st.session_state:
-        st.session_state["edit_reminder_datetime_local"] = datetime.combine(date.today(), time(9,0))
-
-    st.session_state["edit_rem_mode"] = rem2c1.selectbox(
-        "Reminder Type",
-        ["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"],
-        index=["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"]
-              .index(st.session_state["edit_rem_mode"]),
-        key="edit_rem_mode_live"
-    )
-
-    if st.session_state["edit_rem_mode"].startswith("Minutes"):
-        st.session_state["edit_reminder_minutes"] = rem2c2.number_input(
-            "Minutes before start", min_value=0, max_value=10080,
-            value=int(st.session_state["edit_reminder_minutes"]),
-            key="edit_rem_mins_live"
-        )
-    elif st.session_state["edit_rem_mode"].startswith("Days"):
-        st.session_state["edit_reminder_days"] = rem2c2.number_input(
-            "Days before start", min_value=1, max_value=365,
-            value=int(st.session_state["edit_reminder_days"]),
-            key="edit_rem_days_live"
-        )
-    else:
-        st.session_state["edit_reminder_datetime_local"] = rem2c2.datetime_input(
-            "Reminder date & time",
-            value=st.session_state["edit_reminder_datetime_local"],
-            key="edit_rem_dt_live"
+        st.session_state["edit_rem_mode"] = rem2c1.selectbox(
+            "Reminder Type",
+            ["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"],
+            index=["Minutes before start (Outlook)", "Days before start (Outlook)", "On date/time (Email via app)"]
+                  .index(st.session_state["edit_rem_mode"]),
+            key="edit_rem_mode_live"
         )
 
-
-    # 👇 ADD THIS BLOCK *HERE* (just before the Save button)
-    st.text_input(
-        "Outlook Event ID",
-        value=ev.get("outlook_event_id") or "",
-        disabled=True,
-        key="edit_outlook_event_id_ro"
-    )
-
-    if st.button("Save Changes", type="primary"):
-        # ---- Validate ----
-        errs = []
-        if not subject_e:
-            errs.append("Event Title is required.")
-        if event_type_e == "In-person" and not location_e:
-            errs.append("Location is required for in-person events.")
-        if not (manager_name_e and manager_email_e):
-            errs.append("Meeting Manager name and email are required.")
-        if errs:
-            st.error("\n".join(errs))
-            st.stop()
-
-        with st.spinner("Updating event…"):
-            try:
-                # ---- Build new local datetimes ----
-                tz_choice_lbl = tz_choice_e
-                iana_new = IANA_MAP[tz_choice_lbl]
-                tz_new = ZoneInfo(iana_new)
-
-                if is_all_day_e:
-                    start_local_new = datetime.combine(start_date_e, time(0, 0)).replace(tzinfo=tz_new)
-                    end_base_new = max(end_date_e, start_date_e)
-                    end_local_new = datetime.combine(end_base_new + timedelta(days=1), time(0, 0)).replace(tzinfo=tz_new)
-                else:
-                    start_local_new = datetime.combine(start_date_e, start_time_e).replace(tzinfo=tz_new)
-                    end_local_new = datetime.combine(end_date_e, end_time_e).replace(tzinfo=tz_new)
-
-                if not is_all_day_e and end_local_new <= start_local_new:
-                    st.error("End date/time must be after start date/time.")
-                    st.stop()
-
-                start_utc_new = start_local_new.astimezone(ZoneInfo("UTC"))
-                end_utc_new   = end_local_new.astimezone(ZoneInfo("UTC"))
-
-                # ---- Reminder minutes for Outlook ----
-                rem_mode_e = st.session_state["edit_rem_mode"]
-                if rem_mode_e.startswith("Minutes"):
-                    rem_minutes_for_graph_e = int(st.session_state.get("edit_reminder_minutes", 30))
-                elif rem_mode_e.startswith("Days"):
-                    rem_minutes_for_graph_e = int(st.session_state.get("edit_reminder_days", 1)) * 1440
-                else:
-                    rem_minutes_for_graph_e = 0  # date-certain handled below
-                rem_minutes_for_graph_e = max(0, min(rem_minutes_for_graph_e, 525600))
-
-                # ---- PATCH Outlook core fields (subject/time/location/reminder); DO NOT send body here ----
-                try:
-                    if ev.get("outlook_event_id"):
-                        if missing:
-                            raise RuntimeError("Missing Graph secrets for update.")
-                        token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
-
-                        tz_windows_e = TZ_MAP[tz_choice_e]
-                        patch_payload = {
-                            "subject": subject_e,
-                            "isAllDay": bool(is_all_day_e),
-                            "start": graph_datetime_obj(start_local_new, tz_windows=tz_windows_e),
-                            "end":   graph_datetime_obj(end_local_new,   tz_windows=tz_windows_e),
-                            "isReminderOn": bool(rem_minutes_for_graph_e > 0),
-                            "reminderMinutesBeforeStart": int(rem_minutes_for_graph_e),
-                        }
-                        if event_type_e == "In-person":
-                            patch_payload["location"] = {"displayName": location_e or ""}
-                        else:
-                            patch_payload["location"] = {"displayName": ""}
-
-                        # Core Outlook update
-                        update_outlook_event(token, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"], patch_payload)
-
-                        # Update ONLY the red Meeting Manager block (preserve ID & formatting)
-                        ok_mgr = update_outlook_manager_block(
-                            outlook_event_id=ev["outlook_event_id"],
-                            manager_name=manager_name_e,
-                            mailbox_upn=GRAPH["shared_mailbox_upn"],
-                            token=token,
-                        )
-                        if not ok_mgr:
-                            st.warning("Could not update the Meeting Manager line in the Outlook body (non-fatal).")
-
-                        # Update Client + Accreditation lines (use THIS event's client from DB, not the Create tab)
-                        client_for_body = ev.get("client") or ""
-                        ok_meta = upsert_outlook_client_and_accreditation(
-                            token=token,
-                            mailbox_upn=GRAPH["shared_mailbox_upn"],
-                            event_id=ev["outlook_event_id"],
-                            client_value=client_for_body,
-                            accreditation_required=accreditation_required_e,
-                        )
-                        if not ok_meta:
-                            st.warning("Could not update Client/Accreditation lines in Outlook body (non-fatal).")
-
-                except Exception as e:
-                    st.error(f"Outlook update failed: {e}")
-
-
-                # ---- UPDATE Supabase ----
-                supabase.table("events").update({
-                    "subject": subject_e,
-                    "client": (ev.get("client") or None),  # keep stored client, or extend UI to change if desired
-                    "start_dt_utc": start_utc_new.isoformat(),
-                    "end_dt_utc": end_utc_new.isoformat(),
-                    "timezone_display": iana_new,
-                    "is_all_day": is_all_day_e,
-                    "location": location_e or None,
-                    "event_type": ("virtual" if event_type_e == "Virtual" else "in_person"),
-                    "virtual_provider": (virtual_provider_e or None),
-                    "virtual_link": (virtual_link_e or None),
-                    "meeting_manager_name": manager_name_e,
-                    "meeting_manager_email": manager_email_e,
-                    "meeting_manager_user_id": manager_user_id_e or None,
-                    "reminder_minutes": int(rem_minutes_for_graph_e),
-                    "accreditation_required": bool(accreditation_required_e),
-                    "updated_at": datetime.utcnow().isoformat(),
-                }).eq("id", ev["id"]).execute()
-
-                # ---- Upsert date-certain reminder (email via app) ----
-                if rem_mode_e.startswith("On date/time") and st.session_state.get("edit_reminder_datetime_local"):
-                    notify_utc_e = st.session_state["edit_reminder_datetime_local"] \
-                        .replace(tzinfo=ZoneInfo(iana_new)).astimezone(ZoneInfo("UTC"))
-                    upsert_custom_reminder(
-                        supabase_client=supabase,
-                        event_id=ev["id"],
-                        notify_at_utc=notify_utc_e.isoformat(),
-                        to_email=manager_email_e,
-                        subject_line=f"Reminder: {subject_e}",
-                        body_html=f"Reminder for {subject_e} ({ev.get('client') or ''})"
-                    )
-
-                # ---- Remove missing-link reminders if we now have a link ----
-                if event_type_e == "Virtual" and virtual_link_e:
-                    delete_missing_link_reminders(supabase, ev["id"])
-
-            except Exception as e:
-                st.error(f"Update failed: {e}")
-                st.stop()
-
-        st.success("Event updated.")
-        st.session_state.pop("edit_confirm_no_link", None)
-        # Keep the edited event visible after refresh (optional UX nicety)
-        try:
-            # show the month of the (new) start date and include next ~30 days
-            new_start_date = start_local_new.date()
-            st.session_state["edit_from"] = new_start_date.replace(day=1)
-            st.session_state["edit_to"]   = new_start_date + timedelta(days=30)
-            # widen client filter so we don't accidentally hide it
-            st.session_state["edit_client"] = "(all)"
-        except Exception:
-            pass        
-
-# -----------------------------
-# Export to Word (grouped by month)
-# -----------------------------
-st.markdown("---")
-
-
-if supabase is None:
-    st.info("Supabase not configured; export disabled.")
-else:
-    try:
-        # Only current & future events (Eastern Time → UTC conversion)
-        today_et = datetime.now(ZoneInfo("America/New_York")).date()
-        start_floor_utc = datetime.combine(today_et, time(0, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
-
-        res = (
-            supabase
-            .table("events")
-            .select("*")
-            .gte("start_dt_utc", start_floor_utc.isoformat())
-            .order("start_dt_utc", desc=False)
-            .execute()
-        )
-        events = res.data or []
-    except Exception as e:
-        events = []
-        st.error(f"Failed to load events: {e}")
-
-
-    def month_key(dt: datetime) -> str:
-        return dt.strftime("%B %Y").upper()
-
-    def _fmt_hhmm(dt):
-        """Portable 12-hour time like 9:00 AM (works on Windows/macOS/Linux)."""
-        s = dt.strftime("%I:%M %p")  # e.g., "09:00 AM"
-        return s.lstrip("0")         # -> "9:00 AM"
-
-    def fmt_time_window_local(start_et, end_et, is_all_day, tz_label="ET"):
-        if is_all_day:
-            return ""  # no inline times for all-day
-        start_str = _fmt_hhmm(start_et)
-        end_str = _fmt_hhmm(end_et)
-        return f" {start_str}–{end_str} {tz_label}"
-
-def build_doc(events: list[dict]) -> bytes:
-    doc = Document()
-    title = doc.add_paragraph("Lutine Meetings Calendar")
-    title_format = title.runs[0].font
-    title_format.size = Pt(16)
-    title_format.bold = True
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    grouped = {}
-    for ev in events:
-        try:
-            start_utc = datetime.fromisoformat(ev["start_dt_utc"].replace("Z", "+00:00"))
-        except Exception:
-            continue
-        start_et = start_utc.astimezone(ZoneInfo("America/New_York"))
-        key = month_key(start_et)
-        grouped.setdefault(key, []).append((start_et, ev))
-
-    # sort months chronologically
-    for mon in sorted(grouped.keys(), key=lambda k: datetime.strptime(k, "%B %Y").date()):
-        doc.add_paragraph("")  # spacing
-        h = doc.add_paragraph(mon)
-        h.runs[0].font.bold = True
-
-        # iterate events within this month
-        for start_et, ev in grouped[mon]:
-            end_utc = datetime.fromisoformat(ev["end_dt_utc"].replace("Z", "+00:00"))
-            end_et = end_utc.astimezone(ZoneInfo("America/New_York"))
-            is_all_day = bool(ev.get("is_all_day"))
-
-            # pieces used in the card
-            month_abbr = start_et.strftime("%b")
-            day_num = start_et.day
-            time_win = fmt_time_window_local(start_et, end_et, is_all_day, tz_label="ET")  # e.g., " 9:00–10:00 ET"
-
-            subject_core = ev.get("subject") or "(No subject)"
-            loc_or_v = ""
-            if ev.get("event_type") == "in_person" and ev.get("location"):
-                loc_or_v = ev["location"]
-            elif ev.get("event_type") == "virtual":
-                vp = (ev.get("virtual_provider") or "other").lower()
-                loc_or_v = {"teams": "Teams", "zoom": "Zoom"}.get(vp, "Virtual")
-
-            subject_display = subject_core + (f" ({loc_or_v})" if loc_or_v else "")
-
-            client_txt = ev.get("client") or ""
-            manager = ev.get("meeting_manager_name") or ""
-            acc = "Y" if ev.get("accreditation_required") else "N"
-
-            # ---------- Card (1-cell table with border) ----------
-            table = doc.add_table(rows=1, cols=1)
-            table.style = "Table Grid"       # adds a thin border
-            table.alignment = WD_TABLE_ALIGNMENT.LEFT
-            cell = table.cell(0, 0)
-
-            # Optional: a little padding via blank first paragraph removal
-            cell.text = ""  # ensure empty to control paragraphs
-
-            # Line 1: Date/time + Client
-            p1 = cell.add_paragraph()
-            r1 = p1.add_run(f"{month_abbr} {day_num}:{time_win}")
-            if client_txt:
-                p1.add_run(f" • Client: {client_txt}")
-
-            # Line 2: Subject (+ location/virtual)
-            p2 = cell.add_paragraph()
-            p2.add_run(subject_display).bold = True
-
-            # Line 3: Meeting Manager (red + bold) + Accreditation
-            p3 = cell.add_paragraph()
-            if manager:
-                r_mm_label = p3.add_run("Meeting Manager: ")
-                r_mm_label.bold = True
-                r_mm_label.font.color.rgb = RGBColor(192, 0, 0)  # #c00000
-
-                r_mm_name = p3.add_run(manager)
-                r_mm_name.bold = True
-                r_mm_name.font.color.rgb = RGBColor(192, 0, 0)
-
-                p3.add_run("   ")  # small spacer
-
-            r_acc_label = p3.add_run("Accreditation: ")
-            r_acc_label.bold = True
-            p3.add_run(acc)
-
-            # spacing after each card
-            doc.add_paragraph("")
-
-    
-    bio = io.BytesIO()
-    doc.save(bio)
-    return bio.getvalue()
-
-
-    if st.button("Build Word Document"):
-        if not events:
-            st.warning("No events found to export.")
+        if st.session_state["edit_rem_mode"].startswith("Minutes"):
+            st.session_state["edit_reminder_minutes"] = rem2c2.number_input(
+                "Minutes before start", min_value=0, max_value=10080,
+                value=int(st.session_state["edit_reminder_minutes"]),
+                key="edit_rem_mins_live"
+            )
+        elif st.session_state["edit_rem_mode"].startswith("Days"):
+            st.session_state["edit_reminder_days"] = rem2c2.number_input(
+                "Days before start", min_value=1, max_value=365,
+                value=int(st.session_state["edit_reminder_days"]),
+                key="edit_rem_days_live"
+            )
         else:
-            doc_bytes = build_doc(events)
-            st.download_button(
-                "Download Word (DOCX)",
-                data=doc_bytes,
-                file_name=f"Lutine_Master_Calendar_{date.today().year}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            st.session_state["edit_reminder_datetime_local"] = rem2c2.datetime_input(
+                "Reminder date & time",
+                value=st.session_state["edit_reminder_datetime_local"],
+                key="edit_rem_dt_live"
             )
 
-# ----- Admin panel: Export to Word (always visible) -----
-with st.sidebar.expander("Admin: Export Events to Word", expanded=False):
-    # Filters for export (independent of page tabs)
-    default_from = date.today().replace(day=1)
-    default_to   = date.today() + timedelta(days=120)
 
-    ex_from = st.date_input("From (ET)", value=st.session_state.get("export_from", default_from), key="export_from")
-    ex_to   = st.date_input("To (ET)",   value=st.session_state.get("export_to", default_to),   key="export_to")
-
-    # Optional client filter
-    clients = load_clients()
-    ex_client = st.selectbox("Client (optional)", ["(all)"] + clients,
-                             index=st.session_state.get("export_client_idx", 0), key="export_client")
-
-    # Cache the export so repeat downloads are instant
-    @st.cache_data(ttl=300)
-    def _load_events_and_build_doc(from_d: date, to_d: date, client_filter: str) -> bytes:
-        # Fetch events (ET → UTC)
-        start_floor_utc = datetime.combine(from_d, time(0, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
-        end_ceil_utc    = datetime.combine(to_d,   time(23,59), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
-
-        q = supabase.table("events").select("*") \
-                 .gte("start_dt_utc", start_floor_utc.isoformat()) \
-                 .lte("start_dt_utc", end_ceil_utc.isoformat()) \
-                 .order("start_dt_utc", desc=False)
-        if client_filter and client_filter != "(all)":
-            q = q.eq("client", client_filter)
-        events = (q.execute().data or [])
-
-        return build_doc(events)  # uses your existing build_doc(...)
-
-    if st.button("Build Word"):
-        try:
-            doc_bytes = _load_events_and_build_doc(ex_from, ex_to, ex_client)
-            st.session_state["export_doc_bytes"] = doc_bytes
-            st.success("Export ready below.")
-        except Exception as e:
-            st.error(f"Export failed: {e}")
-
-    if "export_doc_bytes" in st.session_state:
-        st.download_button(
-            "Download Word (DOCX)",
-            data=st.session_state["export_doc_bytes"],
-            file_name=f"Lutine_Master_Calendar_{date.today().year}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            key="export_download_btn"
+        # 👇 ADD THIS BLOCK *HERE* (just before the Save button)
+        st.text_input(
+            "Outlook Event ID",
+            value=ev.get("outlook_event_id") or "",
+            disabled=True,
+            key="edit_outlook_event_id_ro"
         )
-with tab_table:
-    st.subheader("Preview / Export as Table")
 
-    # --- Filters (ET window and optional client) ---
-    default_from = date.today().replace(day=1)
-    default_to   = date.today() + timedelta(days=120)
+        if st.button("Save Changes", type="primary"):
+            # ---- Validate ----
+            errs = []
+            if not subject_e:
+                errs.append("Event Title is required.")
+            if event_type_e == "In-person" and not location_e:
+                errs.append("Location is required for in-person events.")
+            if not (manager_name_e and manager_email_e):
+                errs.append("Meeting Manager name and email are required.")
+            if errs:
+                st.error("\n".join(errs))
+                st.stop()
 
-    tv_from = st.date_input("From (ET)", value=st.session_state.get("table_from", default_from), key="table_from")
-    tv_to   = st.date_input("To (ET)",   value=st.session_state.get("table_to", default_to),   key="table_to")
+            with st.spinner("Updating event…"):
+                try:
+                    # ---- Build new local datetimes ----
+                    tz_choice_lbl = tz_choice_e
+                    iana_new = IANA_MAP[tz_choice_lbl]
+                    tz_new = ZoneInfo(iana_new)
 
-    clients = load_clients()
-    tv_client = st.selectbox(
-        "Client (optional)",
-        ["(all)"] + clients,
-        index=st.session_state.get("table_client_idx", 0),
-        key="table_client"
-    )
+                    if is_all_day_e:
+                        start_local_new = datetime.combine(start_date_e, time(0, 0)).replace(tzinfo=tz_new)
+                        end_base_new = max(end_date_e, start_date_e)
+                        end_local_new = datetime.combine(end_base_new + timedelta(days=1), time(0, 0)).replace(tzinfo=tz_new)
+                    else:
+                        start_local_new = datetime.combine(start_date_e, start_time_e).replace(tzinfo=tz_new)
+                        end_local_new = datetime.combine(end_date_e, end_time_e).replace(tzinfo=tz_new)
 
-    @st.cache_data(ttl=300)
-    def _load_events_for_table(from_d: date, to_d: date, client_filter: str) -> list[dict]:
-        # Match the same ET→UTC window and ordering used by the Word export
-        start_floor_utc = datetime.combine(from_d, time(0, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
-        end_ceil_utc    = datetime.combine(to_d,   time(23,59), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+                    if not is_all_day_e and end_local_new <= start_local_new:
+                        st.error("End date/time must be after start date/time.")
+                        st.stop()
 
-        q = supabase.table("events").select("*") \
-                 .gte("start_dt_utc", start_floor_utc.isoformat()) \
-                 .lte("start_dt_utc", end_ceil_utc.isoformat()) \
-                 .order("start_dt_utc", desc=False)
-        if client_filter and client_filter != "(all)":
-            q = q.eq("client", client_filter)
-        return q.execute().data or []
+                    start_utc_new = start_local_new.astimezone(ZoneInfo("UTC"))
+                    end_utc_new   = end_local_new.astimezone(ZoneInfo("UTC"))
 
-    def _fmt_hhmm(dt: datetime) -> str:
-        s = dt.strftime("%I:%M %p")
-        return s.lstrip("0")
+                    # ---- Reminder minutes for Outlook ----
+                    rem_mode_e = st.session_state["edit_rem_mode"]
+                    if rem_mode_e.startswith("Minutes"):
+                        rem_minutes_for_graph_e = int(st.session_state.get("edit_reminder_minutes", 30))
+                    elif rem_mode_e.startswith("Days"):
+                        rem_minutes_for_graph_e = int(st.session_state.get("edit_reminder_days", 1)) * 1440
+                    else:
+                        rem_minutes_for_graph_e = 0  # date-certain handled below
+                    rem_minutes_for_graph_e = max(0, min(rem_minutes_for_graph_e, 525600))
 
-    def _et(dt_utc_iso: str) -> datetime:
-        return datetime.fromisoformat(dt_utc_iso.replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York"))
+                    # ---- PATCH Outlook core fields (subject/time/location/reminder); DO NOT send body here ----
+                    try:
+                        if ev.get("outlook_event_id"):
+                            if missing:
+                                raise RuntimeError("Missing Graph secrets for update.")
+                            token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
 
-    def events_to_df(events: list[dict]) -> pd.DataFrame:
-        rows = []
+                            tz_windows_e = TZ_MAP[tz_choice_e]
+                            patch_payload = {
+                                "subject": subject_e,
+                                "isAllDay": bool(is_all_day_e),
+                                "start": graph_datetime_obj(start_local_new, tz_windows=tz_windows_e),
+                                "end":   graph_datetime_obj(end_local_new,   tz_windows=tz_windows_e),
+                                "isReminderOn": bool(rem_minutes_for_graph_e > 0),
+                                "reminderMinutesBeforeStart": int(rem_minutes_for_graph_e),
+                            }
+                            if event_type_e == "In-person":
+                                patch_payload["location"] = {"displayName": location_e or ""}
+                            else:
+                                patch_payload["location"] = {"displayName": ""}
+
+                            # Core Outlook update
+                            update_outlook_event(token, GRAPH["shared_mailbox_upn"], ev["outlook_event_id"], patch_payload)
+
+                            # Update ONLY the red Meeting Manager block (preserve ID & formatting)
+                            ok_mgr = update_outlook_manager_block(
+                                outlook_event_id=ev["outlook_event_id"],
+                                manager_name=manager_name_e,
+                                mailbox_upn=GRAPH["shared_mailbox_upn"],
+                                token=token,
+                            )
+                            if not ok_mgr:
+                                st.warning("Could not update the Meeting Manager line in the Outlook body (non-fatal).")
+
+                            # Update Client + Accreditation lines (use THIS event's client from DB, not the Create tab)
+                            client_for_body = ev.get("client") or ""
+                            ok_meta = upsert_outlook_client_and_accreditation(
+                                token=token,
+                                mailbox_upn=GRAPH["shared_mailbox_upn"],
+                                event_id=ev["outlook_event_id"],
+                                client_value=client_for_body,
+                                accreditation_required=accreditation_required_e,
+                            )
+                            if not ok_meta:
+                                st.warning("Could not update Client/Accreditation lines in Outlook body (non-fatal).")
+
+                    except Exception as e:
+                        st.error(f"Outlook update failed: {e}")
+
+
+                    # ---- UPDATE Supabase ----
+                    supabase.table("events").update({
+                        "subject": subject_e,
+                        "client": (ev.get("client") or None),  # keep stored client, or extend UI to change if desired
+                        "start_dt_utc": start_utc_new.isoformat(),
+                        "end_dt_utc": end_utc_new.isoformat(),
+                        "timezone_display": iana_new,
+                        "is_all_day": is_all_day_e,
+                        "location": location_e or None,
+                        "event_type": ("virtual" if event_type_e == "Virtual" else "in_person"),
+                        "virtual_provider": (virtual_provider_e or None),
+                        "virtual_link": (virtual_link_e or None),
+                        "meeting_manager_name": manager_name_e,
+                        "meeting_manager_email": manager_email_e,
+                        "meeting_manager_user_id": manager_user_id_e or None,
+                        "reminder_minutes": int(rem_minutes_for_graph_e),
+                        "accreditation_required": bool(accreditation_required_e),
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }).eq("id", ev["id"]).execute()
+
+                    # ---- Upsert date-certain reminder (email via app) ----
+                    if rem_mode_e.startswith("On date/time") and st.session_state.get("edit_reminder_datetime_local"):
+                        notify_utc_e = st.session_state["edit_reminder_datetime_local"] \
+                            .replace(tzinfo=ZoneInfo(iana_new)).astimezone(ZoneInfo("UTC"))
+                        upsert_custom_reminder(
+                            supabase_client=supabase,
+                            event_id=ev["id"],
+                            notify_at_utc=notify_utc_e.isoformat(),
+                            to_email=manager_email_e,
+                            subject_line=f"Reminder: {subject_e}",
+                            body_html=f"Reminder for {subject_e} ({ev.get('client') or ''})"
+                        )
+
+                    # ---- Remove missing-link reminders if we now have a link ----
+                    if event_type_e == "Virtual" and virtual_link_e:
+                        delete_missing_link_reminders(supabase, ev["id"])
+
+                except Exception as e:
+                    st.error(f"Update failed: {e}")
+                    st.stop()
+
+            st.success("Event updated.")
+            st.session_state.pop("edit_confirm_no_link", None)
+            # Keep the edited event visible after refresh (optional UX nicety)
+            try:
+                # show the month of the (new) start date and include next ~30 days
+                new_start_date = start_local_new.date()
+                st.session_state["edit_from"] = new_start_date.replace(day=1)
+                st.session_state["edit_to"]   = new_start_date + timedelta(days=30)
+                # widen client filter so we don't accidentally hide it
+                st.session_state["edit_client"] = "(all)"
+            except Exception:
+                pass        
+
+    # -----------------------------
+    # Export to Word (grouped by month)
+    # -----------------------------
+    st.markdown("---")
+
+
+    if supabase is None:
+        st.info("Supabase not configured; export disabled.")
+    else:
+        try:
+            # Only current & future events (Eastern Time → UTC conversion)
+            today_et = datetime.now(ZoneInfo("America/New_York")).date()
+            start_floor_utc = datetime.combine(today_et, time(0, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+
+            res = (
+                supabase
+                .table("events")
+                .select("*")
+                .gte("start_dt_utc", start_floor_utc.isoformat())
+                .order("start_dt_utc", desc=False)
+                .execute()
+            )
+            events = res.data or []
+        except Exception as e:
+            events = []
+            st.error(f"Failed to load events: {e}")
+
+
+        def month_key(dt: datetime) -> str:
+            return dt.strftime("%B %Y").upper()
+
+        def _fmt_hhmm(dt):
+            """Portable 12-hour time like 9:00 AM (works on Windows/macOS/Linux)."""
+            s = dt.strftime("%I:%M %p")  # e.g., "09:00 AM"
+            return s.lstrip("0")         # -> "9:00 AM"
+
+        def fmt_time_window_local(start_et, end_et, is_all_day, tz_label="ET"):
+            if is_all_day:
+                return ""  # no inline times for all-day
+            start_str = _fmt_hhmm(start_et)
+            end_str = _fmt_hhmm(end_et)
+            return f" {start_str}–{end_str} {tz_label}"
+
+    def build_doc(events: list[dict]) -> bytes:
+        doc = Document()
+        title = doc.add_paragraph("Lutine Meetings Calendar")
+        title_format = title.runs[0].font
+        title_format.size = Pt(16)
+        title_format.bold = True
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        grouped = {}
         for ev in events:
             try:
-                start_et = _et(ev["start_dt_utc"])
-                end_et   = _et(ev["end_dt_utc"])
+                start_utc = datetime.fromisoformat(ev["start_dt_utc"].replace("Z", "+00:00"))
             except Exception:
                 continue
+            start_et = start_utc.astimezone(ZoneInfo("America/New_York"))
+            key = month_key(start_et)
+            grouped.setdefault(key, []).append((start_et, ev))
 
-            # Location/virtual tag (mirrors Word export)
-            loc_or_v = ""
-            if (ev.get("event_type") or "").lower() == "in_person" and ev.get("location"):
-                loc_or_v = ev["location"]
-            elif (ev.get("event_type") or "").lower() == "virtual":
-                vp = (ev.get("virtual_provider") or "other").lower()
-                loc_or_v = {"teams": "Teams", "zoom": "Zoom"}.get(vp, "Virtual")
+        # sort months chronologically
+        for mon in sorted(grouped.keys(), key=lambda k: datetime.strptime(k, "%B %Y").date()):
+            doc.add_paragraph("")  # spacing
+            h = doc.add_paragraph(mon)
+            h.runs[0].font.bold = True
 
-            rows.append({
-                "Month": start_et.strftime("%B %Y").upper(),
-                "Date (ET)": start_et.strftime("%b %d, %Y"),
-                "Start (ET)": "" if ev.get("is_all_day") else _fmt_hhmm(start_et),
-                "End (ET)": "" if ev.get("is_all_day") else _fmt_hhmm(end_et),
-                "All-day": bool(ev.get("is_all_day")),
-                "Client": ev.get("client") or "",
-                "Subject": (ev.get("subject") or "(No subject)") + (f" ({loc_or_v})" if loc_or_v else ""),
-                "Manager": ev.get("meeting_manager_name") or "",
-                "Accred.": "Y" if ev.get("accreditation_required") else "N",
-                "Outlook ID": ev.get("outlook_event_id") or "",
-                "Virtual Link": ev.get("virtual_link") or "",
-            })
+            # iterate events within this month
+            for start_et, ev in grouped[mon]:
+                end_utc = datetime.fromisoformat(ev["end_dt_utc"].replace("Z", "+00:00"))
+                end_et = end_utc.astimezone(ZoneInfo("America/New_York"))
+                is_all_day = bool(ev.get("is_all_day"))
 
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df["__sort_month"] = pd.to_datetime(df["Date (ET)"])
-            df = df.sort_values(["__sort_month", "Start (ET)"], kind="stable").drop(columns="__sort_month")
-        return df
+                # pieces used in the card
+                month_abbr = start_et.strftime("%b")
+                day_num = start_et.day
+                time_win = fmt_time_window_local(start_et, end_et, is_all_day, tz_label="ET")  # e.g., " 9:00–10:00 ET"
 
-    # Load on click (keep UI snappy)
-    if st.button("Load table preview", key="load_table_preview"):
-        try:
-            evs = _load_events_for_table(tv_from, tv_to, tv_client)
-            df = events_to_df(evs)
-            if df.empty:
-                st.info("No events found for this window.")
+                subject_core = ev.get("subject") or "(No subject)"
+                loc_or_v = ""
+                if ev.get("event_type") == "in_person" and ev.get("location"):
+                    loc_or_v = ev["location"]
+                elif ev.get("event_type") == "virtual":
+                    vp = (ev.get("virtual_provider") or "other").lower()
+                    loc_or_v = {"teams": "Teams", "zoom": "Zoom"}.get(vp, "Virtual")
+
+                subject_display = subject_core + (f" ({loc_or_v})" if loc_or_v else "")
+
+                client_txt = ev.get("client") or ""
+                manager = ev.get("meeting_manager_name") or ""
+                acc = "Y" if ev.get("accreditation_required") else "N"
+
+                # ---------- Card (1-cell table with border) ----------
+                table = doc.add_table(rows=1, cols=1)
+                table.style = "Table Grid"       # adds a thin border
+                table.alignment = WD_TABLE_ALIGNMENT.LEFT
+                cell = table.cell(0, 0)
+
+                # Optional: a little padding via blank first paragraph removal
+                cell.text = ""  # ensure empty to control paragraphs
+
+                # Line 1: Date/time + Client
+                p1 = cell.add_paragraph()
+                r1 = p1.add_run(f"{month_abbr} {day_num}:{time_win}")
+                if client_txt:
+                    p1.add_run(f" • Client: {client_txt}")
+
+                # Line 2: Subject (+ location/virtual)
+                p2 = cell.add_paragraph()
+                p2.add_run(subject_display).bold = True
+
+                # Line 3: Meeting Manager (red + bold) + Accreditation
+                p3 = cell.add_paragraph()
+                if manager:
+                    r_mm_label = p3.add_run("Meeting Manager: ")
+                    r_mm_label.bold = True
+                    r_mm_label.font.color.rgb = RGBColor(192, 0, 0)  # #c00000
+
+                    r_mm_name = p3.add_run(manager)
+                    r_mm_name.bold = True
+                    r_mm_name.font.color.rgb = RGBColor(192, 0, 0)
+
+                    p3.add_run("   ")  # small spacer
+
+                r_acc_label = p3.add_run("Accreditation: ")
+                r_acc_label.bold = True
+                p3.add_run(acc)
+
+                # spacing after each card
+                doc.add_paragraph("")
+
+        
+        bio = io.BytesIO()
+        doc.save(bio)
+        return bio.getvalue()
+
+
+        if st.button("Build Word Document"):
+            if not events:
+                st.warning("No events found to export.")
             else:
-                st.dataframe(df, hide_index=True, use_container_width=True)
+                doc_bytes = build_doc(events)
                 st.download_button(
-                    "Download CSV",
-                    data=df.to_csv(index=False).encode("utf-8"),
-                    file_name=f"Master_Calendar_Table_{tv_from}_{tv_to}.csv",
-                    mime="text/csv",
+                    "Download Word (DOCX)",
+                    data=doc_bytes,
+                    file_name=f"Lutine_Master_Calendar_{date.today().year}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
-        except Exception as e:
-            st.error(f"Failed to load preview: {e}")
 
-# -----------------------------
-# Admin Tools (Sidebar)
-# -----------------------------
-with st.sidebar:
-    st.header("Admin")
+    # ----- Admin panel: Export to Word (always visible) -----
+    with st.sidebar.expander("Admin: Export Events to Word", expanded=False):
+        # Filters for export (independent of page tabs)
+        default_from = date.today().replace(day=1)
+        default_to   = date.today() + timedelta(days=120)
 
-    if st.session_state.get("role") == "admin":
-        with st.expander("Admin Tools", expanded=False):
-            st.caption("Calendar sync and maintenance")
+        ex_from = st.date_input("From (ET)", value=st.session_state.get("export_from", default_from), key="export_from")
+        ex_to   = st.date_input("To (ET)",   value=st.session_state.get("export_to", default_to),   key="export_to")
 
-            # --- Bulk Sync (delta) ---
-            if st.button("🔄 Bulk Sync Now (Outlook → App)", key="sb_bulk_sync"):
-                try:
-                    if not GRAPH or not all(GRAPH.get(k) for k in ("tenant_id", "client_id", "client_secret", "shared_mailbox_upn")):
-                        raise RuntimeError("Missing Graph secrets.")
-                    if supabase is None:
-                        raise RuntimeError("Supabase not configured.")
+        # Optional client filter
+        clients = load_clients()
+        ex_client = st.selectbox("Client (optional)", ["(all)"] + clients,
+                                 index=st.session_state.get("export_client_idx", 0), key="export_client")
 
-                    token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
-                    dlink = get_delta_link()  # None first time
+        # Cache the export so repeat downloads are instant
+        @st.cache_data(ttl=300)
+        def _load_events_and_build_doc(from_d: date, to_d: date, client_filter: str) -> bytes:
+            # Fetch events (ET → UTC)
+            start_floor_utc = datetime.combine(from_d, time(0, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+            end_ceil_utc    = datetime.combine(to_d,   time(23,59), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
 
-                    # First-time window: last 180d to next 365d
-                    if not dlink:
-                        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-                        start_iso = (_dt.now(_tz.utc) - _td(days=180)).isoformat()
-                        end_iso   = (_dt.now(_tz.utc) + _td(days=365)).isoformat()
-                    else:
-                        start_iso = end_iso = None
+            q = supabase.table("events").select("*") \
+                     .gte("start_dt_utc", start_floor_utc.isoformat()) \
+                     .lte("start_dt_utc", end_ceil_utc.isoformat()) \
+                     .order("start_dt_utc", desc=False)
+            if client_filter and client_filter != "(all)":
+                q = q.eq("client", client_filter)
+            events = (q.execute().data or [])
 
-                    total_updates = 0
-                    last_delta = None
-                    for page in graph_delta_events(token, GRAPH["shared_mailbox_upn"], start_iso, end_iso, delta_link=dlink):
-                        values = page.get("value", [])
-                        for g in values:
-                            # Skip deletions in delta
-                            if "@removed" in g:
-                                # Optional: also delete locally by outlook_event_id here if desired
-                                continue
-                            oeid = g.get("id")
-                            if not oeid:
-                                continue
-                            res = supabase.table("events").select("id").eq("outlook_event_id", oeid).limit(1).execute()
-                            rows = res.data or []
-                            if not rows:
-                                # Not created by app -> ignore (or ingest if desired)
-                                continue
-                            row_id = rows[0]["id"]
-                            updates = map_graph_event_to_row_updates(g)
-                            if updates:
-                                updates["updated_at"] = datetime.utcnow().isoformat()
-                                supabase.table("events").update(updates).eq("id", row_id).execute()
-                                total_updates += 1
-                        last_delta = page.get("@odata.deltaLink") or last_delta
+            return build_doc(events)  # uses your existing build_doc(...)
 
-                    if last_delta:
-                        save_delta_link(last_delta)
-                    st.success(f"Bulk sync complete. Updated {total_updates} event(s).")
-                except Exception as e:
-                    st.error(f"Bulk sync failed: {e}")
-
-            st.divider()
-
-            # --- Per-event Refresh ---
-            # Pre-fill with the selected event's ID if available
-            prefill_id = ""
+        if st.button("Build Word"):
             try:
-                prefill_id = (ev.get("outlook_event_id") or "")
-            except Exception:
-                pass
+                doc_bytes = _load_events_and_build_doc(ex_from, ex_to, ex_client)
+                st.session_state["export_doc_bytes"] = doc_bytes
+                st.success("Export ready below.")
+            except Exception as e:
+                st.error(f"Export failed: {e}")
 
-            selected_event_id = st.text_input("Outlook Event ID", value=prefill_id, key="sb_refresh_id")
+        if "export_doc_bytes" in st.session_state:
+            st.download_button(
+                "Download Word (DOCX)",
+                data=st.session_state["export_doc_bytes"],
+                file_name=f"Lutine_Master_Calendar_{date.today().year}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key="export_download_btn"
+            )
+    with tab_table:
+        st.subheader("Preview / Export as Table")
 
-            if st.button("🔃 Refresh Selected Event", key="sb_refresh_btn"):
-                ev_id_raw = (selected_event_id or "").strip()
-                if not ev_id_raw:
-                    st.warning("Enter an Outlook Event ID first.")
+        # --- Filters (ET window and optional client) ---
+        default_from = date.today().replace(day=1)
+        default_to   = date.today() + timedelta(days=120)
+
+        tv_from = st.date_input("From (ET)", value=st.session_state.get("table_from", default_from), key="table_from")
+        tv_to   = st.date_input("To (ET)",   value=st.session_state.get("table_to", default_to),   key="table_to")
+
+        clients = load_clients()
+        tv_client = st.selectbox(
+            "Client (optional)",
+            ["(all)"] + clients,
+            index=st.session_state.get("table_client_idx", 0),
+            key="table_client"
+        )
+
+        @st.cache_data(ttl=300)
+        def _load_events_for_table(from_d: date, to_d: date, client_filter: str) -> list[dict]:
+            # Match the same ET→UTC window and ordering used by the Word export
+            start_floor_utc = datetime.combine(from_d, time(0, 0), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+            end_ceil_utc    = datetime.combine(to_d,   time(23,59), tzinfo=ZoneInfo("America/New_York")).astimezone(ZoneInfo("UTC"))
+
+            q = supabase.table("events").select("*") \
+                     .gte("start_dt_utc", start_floor_utc.isoformat()) \
+                     .lte("start_dt_utc", end_ceil_utc.isoformat()) \
+                     .order("start_dt_utc", desc=False)
+            if client_filter and client_filter != "(all)":
+                q = q.eq("client", client_filter)
+            return q.execute().data or []
+
+        def _fmt_hhmm(dt: datetime) -> str:
+            s = dt.strftime("%I:%M %p")
+            return s.lstrip("0")
+
+        def _et(dt_utc_iso: str) -> datetime:
+            return datetime.fromisoformat(dt_utc_iso.replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York"))
+
+        def events_to_df(events: list[dict]) -> pd.DataFrame:
+            rows = []
+            for ev in events:
+                try:
+                    start_et = _et(ev["start_dt_utc"])
+                    end_et   = _et(ev["end_dt_utc"])
+                except Exception:
+                    continue
+
+                # Location/virtual tag (mirrors Word export)
+                loc_or_v = ""
+                if (ev.get("event_type") or "").lower() == "in_person" and ev.get("location"):
+                    loc_or_v = ev["location"]
+                elif (ev.get("event_type") or "").lower() == "virtual":
+                    vp = (ev.get("virtual_provider") or "other").lower()
+                    loc_or_v = {"teams": "Teams", "zoom": "Zoom"}.get(vp, "Virtual")
+
+                rows.append({
+                    "Month": start_et.strftime("%B %Y").upper(),
+                    "Date (ET)": start_et.strftime("%b %d, %Y"),
+                    "Start (ET)": "" if ev.get("is_all_day") else _fmt_hhmm(start_et),
+                    "End (ET)": "" if ev.get("is_all_day") else _fmt_hhmm(end_et),
+                    "All-day": bool(ev.get("is_all_day")),
+                    "Client": ev.get("client") or "",
+                    "Subject": (ev.get("subject") or "(No subject)") + (f" ({loc_or_v})" if loc_or_v else ""),
+                    "Manager": ev.get("meeting_manager_name") or "",
+                    "Accred.": "Y" if ev.get("accreditation_required") else "N",
+                    "Outlook ID": ev.get("outlook_event_id") or "",
+                    "Virtual Link": ev.get("virtual_link") or "",
+                })
+
+            df = pd.DataFrame(rows)
+            if not df.empty:
+                df["__sort_month"] = pd.to_datetime(df["Date (ET)"])
+                df = df.sort_values(["__sort_month", "Start (ET)"], kind="stable").drop(columns="__sort_month")
+            return df
+
+        # Load on click (keep UI snappy)
+        if st.button("Load table preview", key="load_table_preview"):
+            try:
+                evs = _load_events_for_table(tv_from, tv_to, tv_client)
+                df = events_to_df(evs)
+                if df.empty:
+                    st.info("No events found for this window.")
                 else:
-                    try:
-                        # quick sanity: Graph IDs are usually long-ish; obvious truncation -> warn early
-                        if len(ev_id_raw) < 40:
-                            st.warning("That ID looks truncated. Please paste the full Outlook event ID.")
-                            st.stop()
+                    st.dataframe(df, hide_index=True, use_container_width=True)
+                    st.download_button(
+                        "Download CSV",
+                        data=df.to_csv(index=False).encode("utf-8"),
+                        file_name=f"Master_Calendar_Table_{tv_from}_{tv_to}.csv",
+                        mime="text/csv",
+                    )
+            except Exception as e:
+                st.error(f"Failed to load preview: {e}")
 
-                        if not GRAPH or not all(GRAPH.get(k) for k in ("tenant_id","client_id","client_secret","shared_mailbox_upn")):
+    # -----------------------------
+    # Admin Tools (Sidebar)
+    # -----------------------------
+    with st.sidebar:
+        st.header("Admin")
+
+        if st.session_state.get("role") == "admin":
+            with st.expander("Admin Tools", expanded=False):
+                st.caption("Calendar sync and maintenance")
+
+                # --- Bulk Sync (delta) ---
+                if st.button("🔄 Bulk Sync Now (Outlook → App)", key="sb_bulk_sync"):
+                    try:
+                        if not GRAPH or not all(GRAPH.get(k) for k in ("tenant_id", "client_id", "client_secret", "shared_mailbox_upn")):
                             raise RuntimeError("Missing Graph secrets.")
                         if supabase is None:
                             raise RuntimeError("Supabase not configured.")
 
                         token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
-                        g = graph_get_event(token, GRAPH["shared_mailbox_upn"], ev_id_raw)  # encodes internally
+                        dlink = get_delta_link()  # None first time
 
-                        # Try exact match first
-                        res = supabase.table("events").select("id").eq("outlook_event_id", ev_id_raw).limit(1).execute()
-                        rows = res.data or []
-                        # If not found and an event is currently selected in the Edit tab, fall back to it
-                        if not rows:
-                            try:
-                                rows = [{"id": ev["id"]}] if ev.get("id") else []
-                            except Exception:
-                                rows = []
-
-                        if not rows:
-                            st.warning("No local event matches this Outlook ID.")
+                        # First-time window: last 180d to next 365d
+                        if not dlink:
+                            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+                            start_iso = (_dt.now(_tz.utc) - _td(days=180)).isoformat()
+                            end_iso   = (_dt.now(_tz.utc) + _td(days=365)).isoformat()
                         else:
-                            row_id = rows[0]["id"]
-                            updates = map_graph_event_to_row_updates(g)
-                            if not updates:
-                                st.info("No Outlook-owned fields to update.")
-                            else:
-                                updates["updated_at"] = datetime.utcnow().isoformat()
-                                supabase.table("events").update(updates).eq("id", row_id).execute()
-                                st.success(f"Refreshed from Outlook → updated: {', '.join(updates.keys())}")
+                            start_iso = end_iso = None
+
+                        total_updates = 0
+                        last_delta = None
+                        for page in graph_delta_events(token, GRAPH["shared_mailbox_upn"], start_iso, end_iso, delta_link=dlink):
+                            values = page.get("value", [])
+                            for g in values:
+                                # Skip deletions in delta
+                                if "@removed" in g:
+                                    # Optional: also delete locally by outlook_event_id here if desired
+                                    continue
+                                oeid = g.get("id")
+                                if not oeid:
+                                    continue
+                                res = supabase.table("events").select("id").eq("outlook_event_id", oeid).limit(1).execute()
+                                rows = res.data or []
+                                if not rows:
+                                    # Not created by app -> ignore (or ingest if desired)
+                                    continue
+                                row_id = rows[0]["id"]
+                                updates = map_graph_event_to_row_updates(g)
+                                if updates:
+                                    updates["updated_at"] = datetime.utcnow().isoformat()
+                                    supabase.table("events").update(updates).eq("id", row_id).execute()
+                                    total_updates += 1
+                            last_delta = page.get("@odata.deltaLink") or last_delta
+
+                        if last_delta:
+                            save_delta_link(last_delta)
+                        st.success(f"Bulk sync complete. Updated {total_updates} event(s).")
                     except Exception as e:
-                        st.error(f"Refresh failed: {e}")
+                        st.error(f"Bulk sync failed: {e}")
 
-            st.divider()
+                st.divider()
 
-            # (Optional) Quick list of recent events for copy/paste of IDs
-            if st.checkbox("Show recent events (IDs)", key="sb_show_ids"):
+                # --- Per-event Refresh ---
+                # Pre-fill with the selected event's ID if available
+                prefill_id = ""
                 try:
-                    res = (
-                        supabase.table("events")
-                        .select("subject,start_dt_utc,outlook_event_id")
-                        .order("start_dt_utc", desc=True)
-                        .limit(20)
-                        .execute()
-                    )
-                    rows = res.data or []
-                    if not rows:
-                        st.caption("No events found.")
+                    prefill_id = (ev.get("outlook_event_id") or "")
+                except Exception:
+                    pass
+
+                selected_event_id = st.text_input("Outlook Event ID", value=prefill_id, key="sb_refresh_id")
+
+                if st.button("🔃 Refresh Selected Event", key="sb_refresh_btn"):
+                    ev_id_raw = (selected_event_id or "").strip()
+                    if not ev_id_raw:
+                        st.warning("Enter an Outlook Event ID first.")
                     else:
-                        for r in rows:
-                            st.write(f"• {r['subject']} — {r['start_dt_utc'][:16]}  |  ID: {r.get('outlook_event_id') or '—'}")
-                except Exception as e:
-                    st.warning(f"Could not load events: {e}")
+                        try:
+                            # quick sanity: Graph IDs are usually long-ish; obvious truncation -> warn early
+                            if len(ev_id_raw) < 40:
+                                st.warning("That ID looks truncated. Please paste the full Outlook event ID.")
+                                st.stop()
 
-    else:
-        st.caption("No admin tools available for your role.")
+                            if not GRAPH or not all(GRAPH.get(k) for k in ("tenant_id","client_id","client_secret","shared_mailbox_upn")):
+                                raise RuntimeError("Missing Graph secrets.")
+                            if supabase is None:
+                                raise RuntimeError("Supabase not configured.")
+
+                            token = get_graph_token(GRAPH["tenant_id"], GRAPH["client_id"], GRAPH["client_secret"])
+                            g = graph_get_event(token, GRAPH["shared_mailbox_upn"], ev_id_raw)  # encodes internally
+
+                            # Try exact match first
+                            res = supabase.table("events").select("id").eq("outlook_event_id", ev_id_raw).limit(1).execute()
+                            rows = res.data or []
+                            # If not found and an event is currently selected in the Edit tab, fall back to it
+                            if not rows:
+                                try:
+                                    rows = [{"id": ev["id"]}] if ev.get("id") else []
+                                except Exception:
+                                    rows = []
+
+                            if not rows:
+                                st.warning("No local event matches this Outlook ID.")
+                            else:
+                                row_id = rows[0]["id"]
+                                updates = map_graph_event_to_row_updates(g)
+                                if not updates:
+                                    st.info("No Outlook-owned fields to update.")
+                                else:
+                                    updates["updated_at"] = datetime.utcnow().isoformat()
+                                    supabase.table("events").update(updates).eq("id", row_id).execute()
+                                    st.success(f"Refreshed from Outlook → updated: {', '.join(updates.keys())}")
+                        except Exception as e:
+                            st.error(f"Refresh failed: {e}")
+
+                st.divider()
+
+                # (Optional) Quick list of recent events for copy/paste of IDs
+                if st.checkbox("Show recent events (IDs)", key="sb_show_ids"):
+                    try:
+                        res = (
+                            supabase.table("events")
+                            .select("subject,start_dt_utc,outlook_event_id")
+                            .order("start_dt_utc", desc=True)
+                            .limit(20)
+                            .execute()
+                        )
+                        rows = res.data or []
+                        if not rows:
+                            st.caption("No events found.")
+                        else:
+                            for r in rows:
+                                st.write(f"• {r['subject']} — {r['start_dt_utc'][:16]}  |  ID: {r.get('outlook_event_id') or '—'}")
+                    except Exception as e:
+                        st.warning(f"Could not load events: {e}")
+
+        else:
+            st.caption("No admin tools available for your role.")
 
 
 
-# -----------------------------
-# Sidebar help
-# -----------------------------
-#with st.sidebar:
-    #st.header("Setup Checklist")
-    #st.markdown("- Shared mailbox set (e.g., calendar@yourorg.org)")
-    #st.markdown("- Azure App Registration with **Calendars.ReadWrite** (Application)")
-    #st.markdown("- Streamlit secrets: **graph**, **supabase**")
-    #st.markdown("- Optional SMTP secrets for email: **smtp** (host, port, user, password, from_addr, from_name)")
-    #st.caption("Time zones: stored as UTC + IANA; Graph uses Windows TZ IDs. Events are created with showAs=Free. Accreditation email sent if selected.")
+    # -----------------------------
+    # Sidebar help
+    # -----------------------------
+    #with st.sidebar:
+        #st.header("Setup Checklist")
+        #st.markdown("- Shared mailbox set (e.g., calendar@yourorg.org)")
+        #st.markdown("- Azure App Registration with **Calendars.ReadWrite** (Application)")
+        #st.markdown("- Streamlit secrets: **graph**, **supabase**")
+        #st.markdown("- Optional SMTP secrets for email: **smtp** (host, port, user, password, from_addr, from_name)")
+        #st.caption("Time zones: stored as UTC + IANA; Graph uses Windows TZ IDs. Events are created with showAs=Free. Accreditation email sent if selected.")
 
+pg = st.navigation([
+    st.Page(calendar_page, title="Calendar"),
+    st.Page("pages/AV_Intake.py", title="AV Intake"),
+    st.Page("pages/AV_Request_Detail.py", title="AV Request Detail"),
+])
+
+pg.run()
 
 
 
