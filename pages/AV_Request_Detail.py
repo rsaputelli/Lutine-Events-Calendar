@@ -5,8 +5,13 @@ import pandas as pd
 
 from lib.supabase_client import get_supabase
 
-st.title("AV Request Detail")
-st.caption("Read-only view of an AV request (single source of truth).")
+# ---- header/logo ----
+logo_col, title_col = st.columns([1, 6])
+with logo_col:
+    st.image("assets/lutine-logo.png", width=230)
+with title_col:
+    st.title("AV Request Detail")
+    st.caption("Read-only view of an AV request (single source of truth).")
 
 sb = get_supabase()
 

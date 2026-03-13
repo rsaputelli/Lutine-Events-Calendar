@@ -6,8 +6,13 @@ from datetime import datetime, timezone
 
 from lib.supabase_client import get_supabase
 
-st.title("AV Request Intake")
-st.caption("Submit an AV request for a scheduled meeting (or as a standalone request).")
+# ---- header/logo ----
+logo_col, title_col = st.columns([1, 6])
+with logo_col:
+    st.image("assets/lutine-logo.png", width=230)
+with title_col:
+    st.title("AV Request Intake")
+    st.caption("Submit an AV request for a scheduled meeting (or as a standalone request).")
 
 sb = get_supabase()
 
