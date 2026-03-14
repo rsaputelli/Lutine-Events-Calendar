@@ -631,7 +631,7 @@ with right:
                 "badge_printer": "Badge Printer",
             }
 
-            st.write(display_name.get(et, et.capitalize())))
+            st.write(display_name.get(et, et.capitalize()))
         with c2:
             qty = st.number_input(
                 f"Qty ({et})",
