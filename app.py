@@ -1419,10 +1419,15 @@ def calendar_page():
 
         # Top controls
         top_cols = st.columns(3)
+        tz_options = list(TZ_MAP.keys())
+        current_edit_tz = st.session_state.get("edit_tz_choice", "Eastern")
+        if current_edit_tz not in tz_options:
+            current_edit_tz = "Eastern"
+
         tz_choice_e = top_cols[0].selectbox(
             "Time Zone",
-            list(TZ_MAP.keys()),
-            index=list(TZ_MAP.keys()).index(st.session_state["edit_tz_choice"]),
+            tz_options,
+            index=tz_options.index(current_edit_tz),
             key="edit_tz_choice"
         )
         is_all_day_e = top_cols[1].checkbox("All-Day Event", key="edit_is_all_day")
