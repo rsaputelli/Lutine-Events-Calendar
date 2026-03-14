@@ -85,9 +85,9 @@ def calendar_page():
 
 
     # Header/logo (main page, replaces sidebar branding)
-    logo_col, title_col = st.columns([1, 6])
+    logo_col, title_col = st.columns([1.4, 5.6])
     with logo_col:
-        st.image("assets/lutine-logo.png", width=230)
+        st.image("assets/lutine-logo.png", width=170)
     with title_col:
         st.title("Master Calendar Intake Form")
         st.caption("Use this form to add or edit Master Calendar")
@@ -672,18 +672,19 @@ def calendar_page():
         except Exception:
             return []
 
-    def load_managers() -> List[Tuple[str, str, str]]:
+    def load_managers() -> List[Tuple[str, str, str, str]]:
         try:
             if supabase is None:
                 return []
             res = (
                 supabase.table("meeting_managers")
-                .select("auth_user_id,name,email")
+                .select("id,auth_user_id,name,email")
                 .order("name")
                 .execute()
             )
             return [
                 (
+                    r.get("id") or "",
                     r.get("auth_user_id") or "",
                     r.get("name") or "",
                     r.get("email") or "",
@@ -972,7 +973,7 @@ def calendar_page():
             managers = load_managers()  # list of (auth_user_id, name, email)
             manager_labels = [
                 f"{name} <{email}>" if email else name
-                for auth_user_id, name, email in managers
+                for mm_id, auth_user_id, name, email in managers
             ]
             manager_sel = st.selectbox(
                 "Choose manager",
@@ -992,8 +993,31 @@ def calendar_page():
             else:
                 idx = manager_labels.index(manager_sel) if manager_sel in manager_labels else -1
                 if idx >= 0:
-                    manager_user_id, manager_name, manager_email = managers[idx]
+                    _, manager_user_id, manager_name, manager_email = managers[idx]
 
+            # Speaker Manager dropdown (optional; must come from meeting_managers)
+            st.markdown("**Speaker Manager (optional):**")
+
+            speaker_labels = ["None"] + [
+                f"{name} <{email}>" if email else name
+                for mm_id, auth_user_id, name, email in managers
+            ]
+
+            speaker_sel = st.selectbox(
+                "Choose speaker manager",
+                speaker_labels,
+                index=0,
+                key="create_sm_sel"
+            )
+
+            speaker_manager_id = None
+            speaker_manager_name = None
+            speaker_manager_email = None
+
+            if speaker_sel != "None":
+                sidx = speaker_labels.index(speaker_sel) - 1
+                speaker_manager_id, _, speaker_manager_name, speaker_manager_email = managers[sidx]            
+            
             # Optional Notes (included in Outlook body)
             notes = st.text_area("Notes (included in Outlook event body)", key="create_notes")
 
@@ -1004,6 +1028,7 @@ def calendar_page():
                                "We'll remind you every 7 days until a link is added.")
 
             submitted = st.form_submit_button("Create Event")
+
 
         # ----- Create submission handling -----
         if submitted:
@@ -1149,6 +1174,9 @@ def calendar_page():
                     "meeting_manager_name": manager_name,
                     "meeting_manager_email": manager_email,
                     "meeting_manager_user_id": manager_user_id or None,
+                    "speaker_manager_id": speaker_manager_id,
+                    "speaker_manager_name": speaker_manager_name,
+                    "speaker_manager_email": speaker_manager_email,
                     "reminder_minutes": int(rem_minutes_for_graph),
                     "outlook_event_id": outlook_event_id,
                     "accreditation_required": bool(accreditation_required),
@@ -1433,7 +1461,7 @@ def calendar_page():
         managers_e = load_managers()
         manager_labels_e = [
             f"{name} <{email}>" if email else name
-            for auth_user_id, name, email in managers_e
+            for mm_id, auth_user_id, name, email in managers_e
         ]
 
         default_label = f"{ev.get('meeting_manager_name') or ''} <{ev.get('meeting_manager_email') or ''}>".strip()
@@ -1458,7 +1486,37 @@ def calendar_page():
         else:
             idx2 = manager_labels_e.index(manager_sel_e) if manager_sel_e in manager_labels_e else -1
             if idx2 >= 0:
-                manager_user_id_e, manager_name_e, manager_email_e = managers_e[idx2]
+                _, manager_user_id_e, manager_name_e, manager_email_e = managers_e[idx2]
+
+        st.markdown("**Speaker Manager (optional):**")
+
+        speaker_labels_e = ["None"] + [
+            f"{name} <{email}>" if email else name
+            for mm_id, auth_user_id, name, email in managers_e
+        ]
+
+        default_speaker_label_e = "None"
+        if ev.get("speaker_manager_id"):
+            for mm_id, auth_user_id, name, email in managers_e:
+                if mm_id == ev.get("speaker_manager_id"):
+                    default_speaker_label_e = f"{name} <{email}>" if email else name
+                    break
+
+        speaker_sel_e = st.selectbox(
+            "Choose speaker manager",
+            speaker_labels_e,
+            index=speaker_labels_e.index(default_speaker_label_e),
+            key="edit_sm_sel"
+        )
+
+        speaker_manager_id_e = None
+        speaker_manager_name_e = None
+        speaker_manager_email_e = None
+
+        if speaker_sel_e != "None":
+            sidx_e = speaker_labels_e.index(speaker_sel_e) - 1
+            speaker_manager_id_e, _, speaker_manager_name_e, speaker_manager_email_e = managers_e[sidx_e]
+
 
         # Reminder modes (edit)
         rem2c1, rem2c2 = st.columns([1, 2])
@@ -1624,6 +1682,9 @@ def calendar_page():
                         "meeting_manager_name": manager_name_e,
                         "meeting_manager_email": manager_email_e,
                         "meeting_manager_user_id": manager_user_id_e or None,
+                        "speaker_manager_id": speaker_manager_id_e,
+                        "speaker_manager_name": speaker_manager_name_e,
+                        "speaker_manager_email": speaker_manager_email_e,
                         "reminder_minutes": int(rem_minutes_for_graph_e),
                         "accreditation_required": bool(accreditation_required_e),
                         "updated_at": datetime.utcnow().isoformat(),

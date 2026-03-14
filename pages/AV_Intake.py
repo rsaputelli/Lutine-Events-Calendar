@@ -9,9 +9,9 @@ import html
 from lib.supabase_client import get_supabase
 
 # ---- header/logo ----
-logo_col, title_col = st.columns([1, 6])
+logo_col, title_col = st.columns([1.4, 5.6])
 with logo_col:
-    st.image("assets/lutine-logo.png", width=230)
+    st.image("assets/lutine-logo.png", width=170)
 with title_col:
     st.title("AV Request Intake")
     st.caption("Submit an AV request for a scheduled meeting.")
@@ -618,13 +618,20 @@ with right:
     st.subheader("5) Equipment Requested")
 
     # Minimal equipment types for first pass — adjust as needed
-    equipment_types = ["laptop", "projector", "owl"]
+    equipment_types = ["laptop", "projector", "owl", "badge printer"]
 
     eq_rows = []
     for et in equipment_types:
         c1, c2 = st.columns([2, 1])
         with c1:
-            st.write(et.capitalize())
+            display_name = {
+                "laptop": "Laptop",
+                "projector": "Projector",
+                "owl": "Meeting Owl",
+                "badge_printer": "Badge Printer",
+            }
+
+            st.write(display_name.get(et, et.capitalize())))
         with c2:
             qty = st.number_input(
                 f"Qty ({et})",
@@ -777,6 +784,7 @@ with right:
             laptop_qty = qty_map.get("laptop", 0)
             owl_qty = qty_map.get("owl", 0)
             projector_qty = qty_map.get("projector", 0)
+            badge_printer_qty = qty_map.get("badge_printer", 0)
 
             # Route internal owner
             to_emails = []
@@ -785,7 +793,7 @@ with right:
             if laptop_qty > 0:
                 to_emails = [REDEYE_SUPPORT_EMAIL]
                 cc_emails = [RAY_EMAIL]  # only CC Ray when Redeye is TO
-            elif (owl_qty > 0) or (projector_qty > 0):
+            elif (owl_qty > 0) or (projector_qty > 0) or (badge_printer_qty > 0):
                 to_emails = [RAY_EMAIL]
             else:
                 to_emails = [RAY_EMAIL]
@@ -796,10 +804,16 @@ with right:
 
             # Build items list
             items_lines = []
-            for et in ["laptop", "projector", "owl"]:
+            for et in ["laptop", "projector", "owl", "badge printer"]:
                 q = qty_map.get(et, 0)
                 if q > 0:
-                    items_lines.append(f"<li><b>{et.capitalize()}</b>: {q}</li>")
+                    email_display_name = {
+                        "laptop": "Laptop",
+                        "projector": "Projector",
+                        "owl": "Meeting Owl",
+                        "badge_printer": "Badge Printer",
+                    }
+                    items_lines.append(f"<li><b>{email_display_name.get(et, et.capitalize())}</b>: {q}</li>")
             items_html = "<ul>" + "".join(items_lines) + "</ul>" if items_lines else "<i>No items</i>"
 
             ship_to_html = "<br>".join([ln for ln in (ship_to_address or "").splitlines() if ln.strip()])
@@ -818,7 +832,11 @@ with right:
               <p style="margin:0 0 8px 0;"><b>Ship To:</b><br>{ship_to_html}</p>
 
               <p style="margin:0 0 8px 0;"><b>Requested items:</b></p>
-              {items_html}
+              <p style="margin:0 0 8px 0; font-size:10pt; color:#555;">
+              <i>Note: Laptop requests are fulfilled by Redeye. 
+              All other AV equipment (projectors, Owls, badge printers) are fulfilled by Lutine.</i>
+              </p>
+              {items_html}}
 
               <p style="margin:8px 0 0 0;"><b>Request ID:</b> {av_request_id}</p>
               <p style="margin:8px 0 0 0;"><b>Request detail:</b> (link coming soon)</p>
