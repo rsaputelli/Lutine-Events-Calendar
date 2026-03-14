@@ -836,7 +836,7 @@ with right:
               <i>Note: Laptop requests are fulfilled by Redeye. 
               All other AV equipment (projectors, Owls, badge printers) are fulfilled by Lutine.</i>
               </p>
-              {items_html}}
+              {items_html}
 
               <p style="margin:8px 0 0 0;"><b>Request ID:</b> {av_request_id}</p>
               <p style="margin:8px 0 0 0;"><b>Request detail:</b> (link coming soon)</p>
