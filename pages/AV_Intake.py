@@ -369,7 +369,29 @@ venues = load_venues()
 # Prevent duplicate submissions
 if "av_submit_lock" not in st.session_state:
     st.session_state["av_submit_lock"] = False
-    
+
+# Persist AV Intake form fields across reruns
+if "av_last_event_id" not in st.session_state:
+    st.session_state["av_last_event_id"] = "__init__"
+
+if "av_meeting_name" not in st.session_state:
+    st.session_state["av_meeting_name"] = ""
+
+if "av_client_pick" not in st.session_state:
+    st.session_state["av_client_pick"] = "Other…"
+
+if "av_client_other" not in st.session_state:
+    st.session_state["av_client_other"] = ""
+
+if "av_mm_pick" not in st.session_state:
+    st.session_state["av_mm_pick"] = "Other…"
+
+if "av_mm_name_other" not in st.session_state:
+    st.session_state["av_mm_name_other"] = ""
+
+if "av_mm_email_other" not in st.session_state:
+    st.session_state["av_mm_email_other"] = ""
+
 # ---- Session defaults ----
 if "venue_mode" not in st.session_state:
     st.session_state["venue_mode"] = "Select existing venue"
@@ -400,6 +422,46 @@ with left:
     )
     selected_event_obj = next(o for o in event_options if o["label"] == selected_event_label)
     selected_event_id = selected_event_obj.get("id")
+    # Seed AV form fields only when the linked event selection changes
+    if st.session_state.get("av_last_event_id") != selected_event_id:
+        event_row = selected_event_obj.get("row", {}) if selected_event_id else {}
+
+        meeting_name_default = event_row.get("subject") if selected_event_id else ""
+        client_name_default = event_row.get("client") if selected_event_id else ""
+        mm_name_default = event_row.get("meeting_manager_name") if selected_event_id else ""
+        mm_email_default = event_row.get("meeting_manager_email") if selected_event_id else ""
+
+        st.session_state["av_meeting_name"] = meeting_name_default or ""
+
+        client_options_for_seed = load_clients_dropdown()
+        if client_name_default and client_name_default in client_options_for_seed:
+            st.session_state["av_client_pick"] = client_name_default
+            st.session_state["av_client_other"] = ""
+        else:
+            st.session_state["av_client_pick"] = "Other…"
+            st.session_state["av_client_other"] = client_name_default or ""
+
+        managers_for_seed = load_meeting_managers_dropdown()
+        matched_manager_label = None
+
+        for n, e in managers_for_seed:
+            if mm_email_default and e and e.lower() == mm_email_default.lower():
+                matched_manager_label = f"{n} <{e}>" if e else n
+                break
+            if mm_name_default and n and n.lower() == mm_name_default.lower():
+                matched_manager_label = f"{n} <{e}>" if e else n
+                break
+
+        if matched_manager_label:
+            st.session_state["av_mm_pick"] = matched_manager_label
+            st.session_state["av_mm_name_other"] = ""
+            st.session_state["av_mm_email_other"] = ""
+        else:
+            st.session_state["av_mm_pick"] = "Other…"
+            st.session_state["av_mm_name_other"] = mm_name_default or ""
+            st.session_state["av_mm_email_other"] = mm_email_default or ""
+
+        st.session_state["av_last_event_id"] = selected_event_id    
     if selected_event_id is None:
         st.warning(
             "No calendar event is currently linked. "
@@ -416,50 +478,46 @@ with left:
 
     st.subheader("2) Meeting info")
 
-    meeting_name = st.text_input("Meeting Name *", value=meeting_name_default or "")
+    meeting_name = st.text_input("Meeting Name *", key="av_meeting_name")
 
     # ---- Client dropdown (with Other...) ----
     client_options = load_clients_dropdown()
+    client_option_list = (client_options + ["Other…"]) if client_options else ["Other…"]
+
+    if st.session_state.get("av_client_pick") not in client_option_list:
+        st.session_state["av_client_pick"] = "Other…"
+
     client_pick = st.selectbox(
         "Client (optional)",
-        options=(client_options + ["Other…"]) if client_options else ["Other…"],
-        index=(client_options.index(client_name_default) if client_name_default in client_options else 0),
+        options=client_option_list,
         key="av_client_pick",
     )
 
     client_other = ""
     if client_pick == "Other…":
-        client_other = st.text_input("Enter new client name", value=client_name_default or "", key="av_client_other")
+        client_other = st.text_input("Enter new client name", key="av_client_other")
 
     client_name = (client_other.strip() if client_pick == "Other…" else (client_pick or "").strip()) or None
 
 
     # ---- Meeting Manager dropdown (with Other...) ----
-    managers = load_meeting_managers_dropdown()  # list of (name, email)
+    managers = load_meeting_managers_dropdown()
     manager_labels = [f"{n} <{e}>" if e else n for n, e in managers]
+    mm_option_list = (manager_labels + ["Other…"]) if manager_labels else ["Other…"]
 
-    # if event prefilled a manager, try to match it
-    default_manager_idx = 0
-    if selected_event_id and (mm_name_default or mm_email_default):
-        for i, (n, e) in enumerate(managers):
-            if mm_email_default and e and (e.lower() == mm_email_default.lower()):
-                default_manager_idx = i
-                break
-            if mm_name_default and n and (n.lower() == mm_name_default.lower()):
-                default_manager_idx = i
-                break
+    if st.session_state.get("av_mm_pick") not in mm_option_list:
+        st.session_state["av_mm_pick"] = "Other…"
 
     mm_pick = st.selectbox(
         "Meeting Manager (optional)",
-        options=(manager_labels + ["Other…"]) if manager_labels else ["Other…"],
-        index=default_manager_idx if manager_labels else 0,
+        options=mm_option_list,
         key="av_mm_pick",
     )
 
     if mm_pick == "Other…":
         c_mm1, c_mm2 = st.columns(2)
-        meeting_manager_name = c_mm1.text_input("Meeting Manager Name", value=mm_name_default or "", key="av_mm_name_other")
-        meeting_manager_email = c_mm2.text_input("Meeting Manager Email", value=mm_email_default or "", key="av_mm_email_other")
+        meeting_manager_name = c_mm1.text_input("Meeting Manager Name", key="av_mm_name_other")
+        meeting_manager_email = c_mm2.text_input("Meeting Manager Email", key="av_mm_email_other")
         meeting_manager_name = meeting_manager_name.strip() or None
         meeting_manager_email = meeting_manager_email.strip() or None
     else:
