@@ -2,7 +2,9 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, time, timedelta
+from zoneinfo import ZoneInfo
+import html
 
 from lib.supabase_client import get_supabase
 
@@ -12,8 +14,13 @@ with logo_col:
     st.image("assets/lutine-logo.png", width=230)
 with title_col:
     st.title("AV Request Intake")
-    st.caption("Submit an AV request for a scheduled meeting (or as a standalone request).")
+    st.caption("Submit an AV request for a scheduled meeting.")
 
+st.info(
+    "Best Practice: AV requests should normally be tied to an existing Calendar event. "
+    "If the meeting is not yet on the calendar, please create it in the Calendar app first. "
+    "If you submit this form without selecting an event, the system will automatically create a basic calendar event and notify the meeting manager to complete it."
+)
 sb = get_supabase()
 
 # ===============================
@@ -115,7 +122,156 @@ def _graph_send_mail(token: str, shared_mailbox_upn: str, *, to_emails: list[str
     r = requests.post(url, headers=headers, json=payload, timeout=20)
     if r.status_code >= 400:
         raise RuntimeError(f"Graph sendMail {r.status_code}: {r.text}")
+# ===============================
+# Calendar auto-create helpers
+# ===============================
+TZ_WINDOWS = "Eastern Standard Time"
+TZ_IANA = "America/New_York"
 
+def _graph_create_event(token: str, shared_mailbox_upn: str, payload: dict) -> dict:
+    url = f"https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/calendar/events"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Graph create event {r.status_code}: {r.text}")
+    return r.json()
+
+def _build_graph_event_payload(
+    *,
+    subject: str,
+    body_html: str,
+    start_dt,
+    end_dt,
+    is_all_day: bool,
+    location_str: str | None,
+    reminder_minutes: int = 30,
+) -> dict:
+    payload = {
+        "subject": subject,
+        "isReminderOn": True,
+        "reminderMinutesBeforeStart": int(reminder_minutes),
+        "body": {"contentType": "HTML", "content": body_html},
+        "showAs": "free",
+    }
+
+    if is_all_day:
+        start_date = start_dt if isinstance(start_dt, date) and not isinstance(start_dt, datetime) else start_dt.date()
+        end_date = end_dt if isinstance(end_dt, date) and not isinstance(end_dt, datetime) else end_dt.date()
+        end_exclusive = max(end_date, start_date) + timedelta(days=1)
+
+        payload.update({
+            "isAllDay": True,
+            "start": {"dateTime": start_date.isoformat(), "timeZone": TZ_WINDOWS},
+            "end": {"dateTime": end_exclusive.isoformat(), "timeZone": TZ_WINDOWS},
+        })
+    else:
+        if getattr(start_dt, "tzinfo", None) is None or getattr(end_dt, "tzinfo", None) is None:
+            raise ValueError("Timed event datetimes must be timezone-aware.")
+        payload.update({
+            "start": {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": TZ_WINDOWS},
+            "end": {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": TZ_WINDOWS},
+        })
+
+    if location_str:
+        payload["location"] = {"displayName": location_str}
+
+    return payload
+
+def _create_basic_calendar_event_from_av(
+    *,
+    meeting_name: str,
+    client_name: str | None,
+    meeting_manager_name: str | None,
+    meeting_manager_email: str | None,
+    venue_name: str | None,
+    special_instructions: str | None,
+    deliver_by_date,
+    event_start_date,
+    event_end_date,
+):
+    """
+    Creates the Outlook event first, then saves the linked row in public.events.
+    Returns: (local_event_id, outlook_event_id, auto_created_is_all_day)
+    """
+    g = st.secrets["graph"]
+    tz = ZoneInfo(TZ_IANA)
+
+    # If event dates were entered, use them as an all-day event span.
+    # Otherwise create a 1-hour placeholder on the deliver-by date at 9:00 AM ET.
+    if event_start_date:
+        is_all_day = True
+        start_local = event_start_date
+        end_local = event_end_date or event_start_date
+        start_dt_utc = datetime.combine(start_local, time(0, 0)).replace(tzinfo=tz).astimezone(ZoneInfo("UTC"))
+        end_dt_utc = datetime.combine(max(end_local, start_local) + timedelta(days=1), time(0, 0)).replace(tzinfo=tz).astimezone(ZoneInfo("UTC"))
+    else:
+        is_all_day = False
+        start_local = datetime.combine(deliver_by_date, time(9, 0)).replace(tzinfo=tz)
+        end_local = start_local + timedelta(hours=1)
+        start_dt_utc = start_local.astimezone(ZoneInfo("UTC"))
+        end_dt_utc = end_local.astimezone(ZoneInfo("UTC"))
+
+    safe_meeting = html.escape(meeting_name)
+    safe_client = html.escape(client_name or "")
+    safe_manager = html.escape(meeting_manager_name or "")
+    safe_manager_email = html.escape(meeting_manager_email or "")
+    safe_venue = html.escape(venue_name or "")
+    safe_notes = html.escape(special_instructions or "").replace("\n", "<br>")
+
+    body_html = f"""
+    <div style="font-family:Segoe UI, Arial, sans-serif; font-size:11pt;">
+      <p><b>This event was auto-created from AV Intake.</b></p>
+      <p>Please review and complete the event details in the Calendar app.</p>
+      <p><b>Meeting:</b> {safe_meeting}</p>
+      {f"<p><b>Client:</b> {safe_client}</p>" if safe_client else ""}
+      {f"<p><b>Location:</b> {safe_venue}</p>" if safe_venue else ""}
+      {f"<p><b>Meeting Manager:</b> {safe_manager} &lt;{safe_manager_email}&gt;</p>" if safe_manager or safe_manager_email else ""}
+      {f"<p><b>AV Notes:</b><br>{safe_notes}</p>" if safe_notes else ""}
+    </div>
+    """
+
+    payload = _build_graph_event_payload(
+        subject=meeting_name,
+        body_html=body_html,
+        start_dt=start_local,
+        end_dt=end_local,
+        is_all_day=is_all_day,
+        location_str=venue_name,
+        reminder_minutes=30,
+    )
+
+    token = _get_graph_token()
+    created = _graph_create_event(token, g["shared_mailbox_upn"], payload)
+    outlook_event_id = (created or {}).get("id")
+    if not outlook_event_id:
+        raise RuntimeError("Outlook event was not created successfully.")
+
+    event_row = {
+        "subject": meeting_name,
+        "client": client_name or None,
+        "start_dt_utc": start_dt_utc.isoformat(),
+        "end_dt_utc": end_dt_utc.isoformat(),
+        "timezone_display": TZ_IANA,
+        "is_all_day": bool(is_all_day),
+        "location": venue_name or None,
+        "event_type": "in_person",
+        "virtual_provider": None,
+        "virtual_link": None,
+        "meeting_manager_name": meeting_manager_name or None,
+        "meeting_manager_email": meeting_manager_email or None,
+        "reminder_minutes": 30,
+        "outlook_event_id": outlook_event_id,
+        "accreditation_required": False,
+        "created_at": _now_utc_iso(),
+        "outlook_body_html": body_html,
+    }
+
+    ins = sb.table("events").insert(event_row).execute()
+    inserted = (ins.data or [None])[0]
+    if not inserted or not inserted.get("id"):
+        raise RuntimeError("Local events row insert failed after Outlook event creation.")
+
+    return inserted["id"], outlook_event_id, is_all_day
 # ===============================
 # Dropdown loaders (reused concept from calendar app)
 # ===============================
@@ -183,7 +339,7 @@ def load_future_events():
 
 future_events = load_future_events()
 
-event_options = [{"id": None, "label": "— Standalone request (no event yet) —"}]
+event_options = [{"id": None, "label": "— No event selected (system will create a basic calendar event) —"}]
 for e in future_events:
     label = f"{_fmt_dt(e.get('start_dt_utc'))} | {e.get('subject','(No subject)')}"
     if e.get("client"):
@@ -210,6 +366,10 @@ def load_venues():
 
 venues = load_venues()
 
+# Prevent duplicate submissions
+if "av_submit_lock" not in st.session_state:
+    st.session_state["av_submit_lock"] = False
+    
 # ---- Session defaults ----
 if "venue_mode" not in st.session_state:
     st.session_state["venue_mode"] = "Select existing venue"
@@ -240,6 +400,11 @@ with left:
     )
     selected_event_obj = next(o for o in event_options if o["label"] == selected_event_label)
     selected_event_id = selected_event_obj.get("id")
+    if selected_event_id is None:
+        st.warning(
+            "No calendar event is currently linked. "
+            "If you submit this request as-is, the system will create a basic master-calendar event automatically."
+        )
 
     # Pre-fill meeting fields if event chosen
     event_row = selected_event_obj.get("row", {}) if selected_event_id else {}
@@ -494,11 +659,34 @@ with right:
         st.warning("Fix before submitting:\n- " + "\n- ".join(problems))
 
     submit_disabled = len(problems) > 0
-
+    st.caption("Please click submit once and wait for confirmation.")
     if st.button("Submit AV Request", disabled=submit_disabled, type="primary"):
+
+        if st.session_state.get("av_submit_lock"):
+            st.warning("Submission already in progress. Please wait.")
+            st.stop()
+
+        st.session_state["av_submit_lock"] = True
+
         try:
+            auto_created_event = False
+            auto_created_outlook_event_id = None
+
+            if selected_event_id is None:
+                selected_event_id, auto_created_outlook_event_id, auto_created_is_all_day = _create_basic_calendar_event_from_av(
+                    meeting_name=meeting_name.strip(),
+                    client_name=(client_name.strip() if client_name else None),
+                    meeting_manager_name=(meeting_manager_name.strip() if meeting_manager_name else None),
+                    meeting_manager_email=(meeting_manager_email.strip() if meeting_manager_email else None),
+                    venue_name=(venue_name or None),
+                    special_instructions=special_instructions.strip() or None,
+                    deliver_by_date=deliver_by_date,
+                    event_start_date=event_start_date if use_event_dates else None,
+                    event_end_date=event_end_date if use_event_dates else None,
+                )
+                auto_created_event = True
             av_request_payload = {
-                "event_id": selected_event_id,  # may be None
+                "event_id": selected_event_id,
                 "meeting_name": meeting_name.strip(),
                 "client_name": (client_name.strip() if client_name else None),
                 "meeting_manager_name": (meeting_manager_name.strip() if meeting_manager_name else None),
@@ -521,8 +709,7 @@ with right:
             ins_req = sb.table("av_requests").insert(av_request_payload).execute()
             av_req_row = (ins_req.data or [None])[0]
             if not av_req_row or not av_req_row.get("id"):
-                st.error("AV request insert failed (no id returned).")
-                st.stop()
+                raise RuntimeError("AV request insert failed (no id returned).")
 
             av_request_id = av_req_row["id"]
 
@@ -551,7 +738,31 @@ with right:
                     ).execute()
             except Exception:
                 pass
+            if auto_created_event and meeting_manager_email:
+                try:
+                    g = st.secrets["graph"]
+                    token = _get_graph_token()
 
+                    mm_subject = f"Calendar event needs completion — {meeting_name.strip()}"
+                    mm_body_html = f"""
+                    <div style="font-family:Segoe UI, Arial, sans-serif; font-size:11pt;">
+                      <p>A calendar event was automatically created from AV Intake because no event was selected.</p>
+                      <p><b>Meeting:</b> {meeting_name.strip()}</p>
+                      <p><b>AV Request ID:</b> {av_request_id}</p>
+                      <p>Please open the Calendar app and complete the event details.</p>
+                    </div>
+                    """
+
+                    _graph_send_mail(
+                        token,
+                        g["shared_mailbox_upn"],
+                        to_emails=[meeting_manager_email],
+                        cc_emails=[],
+                        subject=mm_subject,
+                        body_html=mm_body_html,
+                    )
+                except Exception as e:
+                    st.warning(f"Event created but meeting manager notice failed: {e}")
             st.cache_data.clear()
 
             # ===============================
@@ -629,8 +840,14 @@ with right:
             except Exception as e:
                 st.warning(f"Request saved, but email failed to send: {e}")
 
-            st.success("AV request submitted.")
+            if auto_created_event:
+                st.success("AV request submitted and a basic calendar event was created automatically.")
+            else:
+                st.success("AV request submitted.")
+
             st.info(f"Request ID: {av_request_id}")
+            st.session_state["av_submit_lock"] = False
 
         except Exception as e:
+            st.session_state["av_submit_lock"] = False
             st.error(f"Submit failed: {e}")
